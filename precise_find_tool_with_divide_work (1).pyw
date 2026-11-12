@@ -6,6 +6,8 @@ import re
 import urllib.parse
 import webbrowser
 import tkinter as tk
+import math
+import pgs_store
 from tkinter import messagebox, ttk
 from datetime import datetime, timezone, timedelta
 import time
@@ -35,23 +37,13 @@ if getattr(sys, "frozen", False):
 else:
     SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 
-WINDOW_STATE_PATH = os.path.join(SCRIPT_DIR, "window_geometry.txt")
-
 def load_window_geometry() -> str:
-    if os.path.exists(WINDOW_STATE_PATH):
-        try:
-            with open(WINDOW_STATE_PATH, "r") as f:
-                content = f.read().strip()
-                if "x" in content and "+" in content:
-                    return content
-        except Exception:
-            pass
-    return "440x580+100+100"
+    g = pgs_store.get("window_geometry", "")
+    return g if isinstance(g, str) and "x" in g and "+" in g else "440x580+100+100"
 
 def save_window_geometry() -> None:
     try:
-        with open(WINDOW_STATE_PATH, "w") as f:
-            f.write(root.geometry())
+        pgs_store.set("window_geometry", root.geometry())
     except Exception:
         pass
 
@@ -59,10 +51,11 @@ def save_window_geometry() -> None:
 _AR_DIGITS = str.maketrans("٠١٢٣٤٥٦٧٨٩۰۱۲۳۴۵۶۷۸۹", "01234567890123456789")
 _STRIP_RE = re.compile(r"[\u0640\u064B-\u065F\u200B-\u200F\u202A-\u202E\u2066-\u2069\ufeff]")
 
-def norm(s) -> str:
-    if s is None:
-        return ""
-    s = str(s).translate(_AR_DIGITS)
+from functools import lru_cache
+
+@lru_cache(maxsize=4096)
+def _norm_cached(s: str) -> str:
+    s = s.translate(_AR_DIGITS)
     s = _STRIP_RE.sub("", s)
     s = s.replace("\u00a0", " ")
     for a in "أإآ":
@@ -70,6 +63,8 @@ def norm(s) -> str:
     s = s.replace("ى", "ي").replace("ة", "ه")
     return " ".join(s.split()).strip()
 
+def norm(s) -> str:
+    return "" if s is None else _norm_cached(str(s))
 def L(row) -> str: return norm(row.get("label"))
 def V(row) -> str: return norm(row.get("value"))
 def K(row) -> str: return str(row.get("link") or "").strip()
@@ -150,7 +145,6 @@ def point_in_polygon(lat, lng, poly):
 
 def meters_to_polygon_edge(lat, lng, poly):
     """Shortest distance (in meters) from a point to the polygon border."""
-    import math
     m_lat = 111132.92
     m_lng = 111412.84 * math.cos(math.radians(lat))
     px, py = 0.0, 0.0
@@ -206,18 +200,6 @@ def check_rules(table: list, calc_area=None, farm_polygon=None, soil_samples=Non
     if calc_area and total_farm_area > 0:
         if abs(calc_area - total_farm_area) / total_farm_area > 0.10:
             add(f"المزرعة المرسومة {round(calc_area, 2):g} فدان لكن الاستمارة مكتوب فيها {total_farm_area:g} فدان")
-
-    # ---- soil samples: count + inside the farm polygon ----
-    soils = [(float(p[0]), float(p[1])) for p in (soil_samples or []) if p and len(p) >= 2]
-    if len(soils) < SOIL_MIN_SAMPLES:
-        add(f"عينات التربة ناقصة ({len(soils)} من {SOIL_MIN_SAMPLES})")
-    poly = [(float(p[0]), float(p[1])) for p in (farm_polygon or []) if p and len(p) >= 2]
-    if len(poly) >= 3 and soils:
-        outside = [i + 1 for i, (la, ln) in enumerate(soils)
-                   if not point_in_polygon(la, ln, poly) and meters_to_polygon_edge(la, ln, poly) > SOIL_EDGE_TOLERANCE_M]
-        if outside:
-            nums = "، ".join(str(x) for x in outside)
-            add(f"عينة التربة رقم {nums} برا حدود المزرعة" if len(outside) == 1 else f"عينات التربة رقم {nums} برا حدود المزرعة")
 
     # ---- soil samples: count + inside the farm polygon ----
     # The checklist table is the source of truth. The map can send a ghost point that is not in the checklist.
@@ -444,24 +426,17 @@ def format_problems(problems: list) -> str:
     return ("- " + " -- ".join(clean) + " -") if clean else ""
 
 # -------------------- Farm history (last 15 farms) -------------------- #
-HISTORY_PATH = os.path.join(SCRIPT_DIR, "farm_history.json")
 HISTORY_MAX = 15
 farm_history = []   # newest first: [{"code": "...", "gov": "..."}]
 
 def load_history() -> None:
     global farm_history
-    try:
-        with open(HISTORY_PATH, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if isinstance(data, list):
-            farm_history = [h for h in data if isinstance(h, dict) and h.get("code")][:HISTORY_MAX]
-    except Exception:
-        farm_history = []
+    data = pgs_store.get("farm_history", [])
+    farm_history = [h for h in data if isinstance(h, dict) and h.get("code")][:HISTORY_MAX] if isinstance(data, list) else []
 
 def save_history() -> None:
     try:
-        with open(HISTORY_PATH, "w", encoding="utf-8") as f:
-            json.dump(farm_history, f, ensure_ascii=False)
+        pgs_store.set("farm_history", farm_history)
     except Exception:
         pass
 
@@ -469,6 +444,8 @@ def add_to_history(code: str, gov: str) -> None:
     global farm_history
     code, gov = (code or "").strip(), (gov or "").strip()
     if not code or code == "--":
+        return
+    if farm_history and farm_history[0]["code"] == code and farm_history[0].get("gov") == gov:
         return
     farm_history = [h for h in farm_history if h["code"] != code]
     farm_history.insert(0, {"code": code, "gov": gov})
@@ -537,9 +514,9 @@ def send_docs_to_extension():
         messagebox.showinfo("Documents", "No documents found in current submission.")
         return
 
-    kobo_user = kobo_user_var.get().strip()
-    if kobo_user not in KOBO_USERS:
-        messagebox.showwarning("Kobo User", "Pick your Kobo username first (dropdown under Farm Rep).")
+    kobo_user = pgs_store.get("kobo_user", "")
+    if not kobo_user:
+        messagebox.showwarning("Kobo User", "Click the Kobo User button and paste your API token first.")
         return
 
     open_all_documents_auto(latest_attachments)
@@ -554,6 +531,10 @@ def send_docs_to_extension():
 # -------------------- Flask Server -------------------- #
 app = Flask(__name__)
 CORS(app)
+import flask.cli
+flask.cli.show_server_banner = lambda *a, **k: None
+import logging
+logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 @app.route('/kobo-data', methods=['POST'])
 def receive_kobo_data():
@@ -565,14 +546,6 @@ def receive_kobo_data():
         farm_polygon = extracted.get('farm_polygon', [])
         soil_samples = extracted.get('soil_samples', [])
         area_faddan = extracted.get('area_faddan', 0)
-
-        print("==================================================")
-        print("✅ RECEIVED NEW SUBMISSION!")
-        print(f"📊 Total Table Rows: {len(table)}")
-        print(f"🌾 Farm Area: {area_faddan} Faddan")
-        print(f"🗺 Polygon Points: {len(farm_polygon)}")
-        print(f"🧪 Soil Samples: {len(soil_samples)}")
-        print("==================================================")
 
         process_incoming_payload(data)
         return jsonify({"status": "success", "message": "Data received successfully"}), 200
@@ -642,41 +615,49 @@ for idx, (label_text, key, _, _) in enumerate(FIELD_TARGETS):
     ent.grid(row=idx, column=1, sticky="ew", ipady=3, pady=2)
     entries[key] = ent
 
-# ---------- Kobo username dropdown (same colours as the other boxes, remembers the last choice) ----------
-KOBO_USERS = ["mansy_ayman", "haidyabdelnasser12345", "eslamashraf", "roaaaboelnaga66_"]
-KOBO_USER_PATH = os.path.join(SCRIPT_DIR, "kobo_user.txt")
-
-def load_kobo_user() -> str:
-    try:
-        with open(KOBO_USER_PATH, "r", encoding="utf-8") as f:
-            name = f.read().strip()
-        return name if name in KOBO_USERS else ""
-    except Exception:
-        return ""
-
 def set_kobo_user(name: str) -> None:
     kobo_user_var.set(name)
-    kobo_user_btn.config(text=f"{name}  ▾")
+    kobo_user_btn.config(text=f"{name}  ▾" if name else "-- click: set my API token --")
+
+def prompt_kobo_token() -> None:
+    from tkinter import simpledialog
+    tok = simpledialog.askstring(
+        "Kobo API token",
+        "Paste YOUR KoboToolbox API token.\n(Kobo → Account Settings → Security → API key)",
+        show="*", parent=root)
+    if not tok or not tok.strip():
+        return
+    tok = tok.strip()
     try:
-        with open(KOBO_USER_PATH, "w", encoding="utf-8") as f:
-            f.write(name)
-    except Exception:
-        pass
+        r = requests.get(f"{SERVER_URL.rstrip('/')}/me/?format=json",
+        headers={"Authorization": f"Token {tok}"}, timeout=15)
+        if r.status_code in (401, 403):
+            messagebox.showerror("Kobo token", "Kobo says this token is not valid.")
+            return
+        r.raise_for_status()
+        name = str(r.json().get("username") or "").strip()
+    except Exception as e:
+        messagebox.showerror("Kobo token", f"Could not check the token:\n{e}")
+        return
+    if not name:
+        messagebox.showerror("Kobo token", "Kobo did not return a username for this token.")
+        return
+    global _uid_cache
+    _uid_cache = None
+    pgs_store.set("kobo_token", tok)
+    pgs_store.set("kobo_user", name)
+    set_kobo_user(name)
 
 tk.Label(fields_frame, text="Kobo User", font=FONT, bg=BG, fg=MUTED,
-         anchor="w", width=10).grid(row=len(FIELD_TARGETS), column=0, sticky="w", padx=(0, 6), pady=2)
+anchor="w", width=10).grid(row=len(FIELD_TARGETS), column=0, sticky="w", padx=(0, 6), pady=2)
 
-kobo_user_var = tk.StringVar(value=load_kobo_user() or "-- select --")
-kobo_user_btn = tk.Menubutton(fields_frame, text=f"{kobo_user_var.get()}  ▾", font=FONT, bg=PANEL, fg=GREEN,
-                              activebackground=PANEL, activeforeground=GREEN, relief="flat", bd=0,
-                              anchor="e", padx=6, cursor="hand2",
-                              highlightthickness=1, highlightbackground=BORDER, highlightcolor="#2980b9")
-kobo_user_menu = tk.Menu(kobo_user_btn, tearoff=0, bg=PANEL, fg=GREEN, font=FONT, bd=0,
-                         activebackground="#2980b9", activeforeground="white")
-for _u in KOBO_USERS:
-    kobo_user_menu.add_command(label=_u, command=lambda n=_u: set_kobo_user(n))
-kobo_user_btn.config(menu=kobo_user_menu)
+kobo_user_var = tk.StringVar(value=pgs_store.get("kobo_user", ""))
+kobo_user_btn = tk.Button(fields_frame, text="", font=FONT, bg=PANEL, fg=GREEN,
+activebackground=PANEL, activeforeground=GREEN, relief="flat", bd=0,
+anchor="e", padx=6, cursor="hand2", command=prompt_kobo_token,
+highlightthickness=1, highlightbackground=BORDER, highlightcolor="#2980b9")
 kobo_user_btn.grid(row=len(FIELD_TARGETS), column=1, sticky="ew", ipady=3, pady=2)
+set_kobo_user(kobo_user_var.get())
 
 # ---------- Green copy bar: covers Farm Code + Governate, copies both as a 2-column table ----------
 def copy_code_and_gov():
@@ -795,25 +776,17 @@ def copy_all_history() -> None:
     copy_to_clipboard("\n".join(f"{h['code']}\t{h.get('gov', '')}" for h in farm_history))
     history_msg.config(text=f"✓ Copied {len(farm_history)} farms")
 
-HISTORY_GEO_PATH = os.path.join(SCRIPT_DIR, "history_geometry.txt")
 _hist_geo_job = None
 
 def load_history_geometry() -> str:
     default = f"300x420+{root.winfo_x() + 30}+{root.winfo_y() + 30}"   # first time: on top of the main window
-    try:
-        with open(HISTORY_GEO_PATH, "r") as f:
-            g = f.read().strip()
-        if re.match(r"^\d+x\d+\+-?\d+\+-?\d+$", g):
-            return g
-    except Exception:
-        pass
-    return default
+    g = pgs_store.get("history_geometry", "")
+    return g if isinstance(g, str) and re.match(r"^\d+x\d+\+-?\d+\+-?\d+$", g) else default
 
 def save_history_geometry() -> None:
     try:
         if history_win is not None and history_win.winfo_exists():
-            with open(HISTORY_GEO_PATH, "w") as f:
-                f.write(history_win.geometry())
+            pgs_store.set("history_geometry", history_win.geometry())
     except Exception:
         pass
 
@@ -921,7 +894,9 @@ def log_to_console(msg: str) -> None:
         try:
             if console_text.winfo_exists():
                 console_text.insert(tk.END, msg + "\n")
-                console_text.see(tk.END)
+                if int(console_text.index("end-1c").split(".")[0]) > 500:
+                    console_text.delete("1.0", "100.0")
+                    console_text.see(tk.END)
         except Exception:
             pass
     root.after(0, append)
@@ -1008,7 +983,7 @@ def process_incoming_payload(data: dict) -> None:
         log_to_console("==========================================")
         log_to_console(f"📥 RECEIVED DATA ({datetime.now().strftime('%H:%M:%S')}) - Rows: {len(table)}")
         log_to_console("==========================================")
-        log_to_console(json.dumps(data, ensure_ascii=False, indent=2))
+        log_to_console(f"   code={extracted_values.get('farm_code')}  gov={extracted_values.get('governate')}  docs={len(latest_attachments)}")
 
     root.after(0, update_gui)
 
@@ -1023,7 +998,6 @@ except Exception:
     CAIRO = timezone(timedelta(hours=3))
 
 # ------------------------- SETTINGS -------------------------
-API_TOKEN = "0db4925666693fec77b017cc4c2f6714e9e2d603"
 SERVER_URL = "https://kf.kobotoolbox.org"
 FORM_NAME = "PGS - New"
 ASSET_UID = ""
@@ -1034,7 +1008,6 @@ GOV_KEY = "engineer_data/__002"
 SPREADSHEET_KEY = "1GYbkWSJao0S5skCEr3Y0BaiHQV2t24-aaCLMCP8UpJs"
 SHEET_DIST_TAB = "_sys_dist"
 SHEET_AUDIT_LOG_TAB = "_sys_audit_log"
-CREDENTIALS_FILE = os.path.join(SCRIPT_DIR, "credentials.json")   # must sit next to this file
 
 TEAM_MEMBERS = [
     "mansy.ayman@ebda.earth",
@@ -1050,14 +1023,39 @@ KOBO_TO_EMAIL = {
     "roaaaboelnaga66_": "roaa.ahmed@ebda.earth",
 }
 
-FIELDS = ["_id", "_validation_status", "_submission_time", FARM_CODE_KEY, GOV_KEY]
-
 FIELDS = ["_id", "_validation_status", FARM_CODE_KEY, GOV_KEY]
 GOVERNORATE_HINTS = ["governorate", "gov", "المحافظة", "المحافظه"]
+FARM_CODE_HINTS = ["farm_id", "كود المزرعة", "كود"]
 # ------------------------------------------------------------
+try:
+    from pgs_key import GOOGLE_KEY_JSON
+except ImportError:
+    GOOGLE_KEY_JSON = ""
 
-HEADERS = {"Authorization": f"Token {API_TOKEN}"}
 
+def load_credentials_info():
+    try:
+        return json.loads(GOOGLE_KEY_JSON)
+    except Exception:
+        return None
+
+
+def _auth_headers():
+    tok = pgs_store.get("kobo_token", "")
+    if not tok:
+        raise RuntimeError("No Kobo API token saved. Click the Kobo User button and paste your token.")
+    return {"Authorization": f"Token {tok}"}
+
+
+_uid_cache = None
+_gc = None
+_sess = None
+
+def _session():
+    global _sess
+    if _sess is None:
+        _sess = requests.Session()
+    return _sess
 
 def get_all_pages(url, what="items", max_pages=None):
     results, page = [], 1
@@ -1065,7 +1063,7 @@ def get_all_pages(url, what="items", max_pages=None):
         LOG(f"[GET] page {page} -> {url}")
         t = time.time()
         try:
-            r = requests.get(url, headers=HEADERS, timeout=(10, 60))
+            r = _session().get(url, headers=_auth_headers(), timeout=(10, 60))
         except requests.exceptions.ConnectTimeout:
             LOG("[FAIL] Could not connect within 10s")
             raise
@@ -1090,17 +1088,19 @@ def get_all_pages(url, what="items", max_pages=None):
             break
     return results
 
-
 def find_asset_uid(server):
+    global _uid_cache
     if ASSET_UID:
         return ASSET_UID
+    if _uid_cache:
+        return _uid_cache
     assets = get_all_pages(f"{server}/api/v2/assets/?format=json&limit=100", "forms")
     wanted = FORM_NAME.strip().lower()
     for a in assets:
         if (a.get("name") or "").strip().lower() == wanted:
-            return a["uid"]
+            _uid_cache = a["uid"]
+            return _uid_cache
     raise RuntimeError(f'Form "{FORM_NAME}" not found.')
-
 
 def get_submissions(server, light=True):
     uid = find_asset_uid(server)
@@ -1120,75 +1120,128 @@ def find_value(sub, hints):
     return ""
 
 def get_gspread_client():
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    creds = Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=scopes)
-    return gspread.authorize(creds)
-
+    global _gc
+    if _gc is None:
+        info = load_credentials_info()
+        if info is None:
+            raise RuntimeError("The Google key is missing from this build (pgs_key.py).")
+        scopes = [
+            "https://www.googleapis.com/auth/spreadsheets",
+            "https://www.googleapis.com/auth/drive",
+        ]
+        _gc = gspread.authorize(Credentials.from_service_account_info(info, scopes=scopes))
+    return _gc
+    
 # -------------------- Work Log (every Docs click -> Google Sheet) -------------------- #
 SHEET_WORK_LOG_TAB = "_sys_work_log"
-WORK_LOG_HEADERS = ["Date", "Time", "Farm Code", "Governorate", "Kobo Username"]
-WORK_LOG_PENDING_PATH = os.path.join(SCRIPT_DIR, "work_log_pending.json")   # clicks that could not be sent yet
+WORK_LOG_HEADERS = ["Date", "Time", "Farm Code", "Governorate", "Kobo Username", "Validated", "Validation Status", "Validated By"]
 _work_log_lock = threading.Lock()
 _work_log_ws = None
 
+_VAL_UID_MAP = {
+    "validation_status_approved": "Approved",
+    "validation_status_not_approved": "Not Approved",
+    "validation_status_on_hold": "On Hold",
+}
+
+
+def _parse_validation_status(vs) -> tuple[str, str]:
+    """Extracts (label, by_whom) from Kobo API v2 _validation_status dict."""
+    if not isinstance(vs, dict) or not vs:
+        return "", ""
+    label = str(vs.get("label") or "").strip()
+    if not label and vs.get("uid"):
+        uid = str(vs.get("uid")).strip()
+        label = _VAL_UID_MAP.get(uid, uid)
+        by_whom = str(vs.get("by_whom") or "").strip()
+        return label, by_whom
+
+
+def _lookup_single_farm_validation(code: str) -> tuple[str, str, str]:
+    """Checks Kobo API v2 for a single farm code right when Docs is clicked."""
+    try:
+        server = SERVER_URL.rstrip("/")
+        uid = find_asset_uid(server)
+        q = quote(json.dumps({FARM_CODE_KEY: code}))
+        f = quote(json.dumps(["_id", "_validation_status", FARM_CODE_KEY]))
+        url = f"{server}/api/v2/assets/{uid}/data/?format=json&query={q}&fields={f}&limit=5"
+        r = _session().get(url, headers=_auth_headers(), timeout=(5, 15))
+        if r.ok:
+            for sub in r.json().get("results", []):
+                label, by = _parse_validation_status(sub.get("_validation_status"))
+                if label:
+                    return "Yes", label, by
+    except Exception:
+        pass
+    return "No", "", ""
+
 
 def _get_work_log_ws():
-    """Opens the _sys_work_log tab once and keeps it (creates the tab + header row the first time)."""
     global _work_log_ws
     if _work_log_ws is None:
         sh = get_gspread_client().open_by_key(SPREADSHEET_KEY)
-        try:
-            ws = sh.worksheet(SHEET_WORK_LOG_TAB)
-        except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=SHEET_WORK_LOG_TAB, rows=5000, cols=8)
-            ws.append_row(WORK_LOG_HEADERS, value_input_option="RAW")
-        _work_log_ws = ws
-    return _work_log_ws
+        _work_log_ws = sh.worksheet(SHEET_WORK_LOG_TAB)    # must already exist, never creates a new tab
+        if _work_log_ws.col_count < 8:
+            _work_log_ws.add_cols(8 - _work_log_ws.col_count)
+            return _work_log_ws
+
+
+def _append_log_rows(rows):
+    ws = _get_work_log_ws()
+    existing_codes = {_farm_key(c) for c in ws.col_values(3)[1:] if _farm_key(c)}
+    unique_rows = []
+    for r in rows:
+        k = _farm_key(r[2])
+        if k and k in existing_codes:
+            continue
+        if k:
+            existing_codes.add(k)
+            padded = list(r) + ["No", "", ""]
+            unique_rows.append(padded[:8])
+
+            if not unique_rows:
+                return 0
+
+            first = len(ws.col_values(1)) + 1                      # next free row, looking at column A only
+            last = first + len(unique_rows) - 1
+            if ws.row_count < last:
+                ws.add_rows(last - ws.row_count + 50)
+                ws.update(range_name=f"A{first}:H{last}", values=unique_rows, value_input_option="USER_ENTERED")
+                return len(unique_rows)
 
 
 def log_docs_click(code, gov, kobo_user):
-    """Adds one row (date, time, farm code, governorate, kobo username) to _sys_work_log.
-    If the internet / Google is down, the row is saved in work_log_pending.json and sent with the next click."""
     global _work_log_ws
     now = datetime.now(CAIRO)
-    new_row = [now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), code, gov, kobo_user]
+    val_flag, val_status, val_by = _lookup_single_farm_validation(code)
+    new_row = [now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), code, gov, kobo_user, val_flag, val_status, val_by]
 
     with _work_log_lock:
-        try:
-            with open(WORK_LOG_PENDING_PATH, "r", encoding="utf-8") as f:
-                rows = json.load(f)
-            if not isinstance(rows, list):
-                rows = []
-        except Exception:
-            rows = []
-        rows.append(new_row)
-
-        try:
-            _get_work_log_ws().append_rows(rows, value_input_option="USER_ENTERED")
-            if os.path.exists(WORK_LOG_PENDING_PATH):
-                os.remove(WORK_LOG_PENDING_PATH)
-            LOG(f"[WORK LOG] ✓ {code} / {kobo_user} saved at {new_row[1]} ({len(rows)} row(s) sent)")
-            ok = True
-        except Exception as e:
-            _work_log_ws = None   # reconnect next time
+        rows = list(pgs_store.get("work_log_pending", []) or [])
+        if not any(_farm_key(r[2]) == _farm_key(code) for r in rows if len(r) > 2):
+            rows.append(new_row)
             try:
-                with open(WORK_LOG_PENDING_PATH, "w", encoding="utf-8") as f:
-                    json.dump(rows, f, ensure_ascii=False)
-            except Exception:
-                pass
-            LOG(f"[WORK LOG] ✗ Could not send ({type(e).__name__}: {e}). Saved locally, will retry on the next Docs click.")
-            ok = False
+                added = _append_log_rows(rows)
+                pgs_store.delete("work_log_pending")
+                if added == 0:
+                    LOG(f"[WORK LOG] ℹ️ {code} is already in _sys_work_log (duplicate skipped).")
+                    status_label = "✓ Already logged"
+                else:
+                    LOG(f"[WORK LOG] ✓ {code} / {kobo_user} saved at {new_row[1]} (Validated={val_flag})")
+                    status_label = "✓ Logged"
+            except Exception as e:
+                _work_log_ws = None
+                pgs_store.set("work_log_pending", rows)
+                LOG(f"[WORK LOG] ✗ Could not send ({type(e).__name__}: {e!r}). Saved (encrypted), will retry on the next Docs click.")
+                status_label = "⚠ Not sent"
 
-    def flash():
-        doc_btn.config(text="✓ Logged" if ok else "⚠ Not sent")
-        root.after(1500, lambda: doc_btn.config(text=f"📂 Docs ({len(latest_attachments)})"))
+def flash():
+    doc_btn.config(text=status_label)
+    root.after(1500, lambda: doc_btn.config(text=f"📂 Docs ({len(latest_attachments)})"))
     root.after(0, flash)
 
-# -------------------- Work Log check (runs on Divide Work) -------------------- #
-WORK_LOG_MONTHS_TO_KEEP = 4   # current month + the 3 months before it. Older rows are deleted automatically.
+    # -------------------- Work Log check (runs on Divide Work) -------------------- #
+    WORK_LOG_MONTHS_TO_KEEP = 4   # current month + the 3 months before it. Older rows are deleted automatically.
 
 
 def _farm_key(code):
@@ -1206,12 +1259,14 @@ def _sheet_date(v):
             return datetime.strptime(s, fmt).date()
         except ValueError:
             pass
-    return None
+        return None
 
 
 def sync_work_log(sh, subs):
-    """1) For every farm in _sys_work_log, checks Kobo: if the farm has a validation, writes Yes in column F
-       (G = validation status, H = validated by).  2) Deletes rows older than the 4-month window."""
+    """1) Deduplicates Farm Codes in _sys_work_log (keeps first entry).
+    2) Checks Kobo _validation_status: writes Yes/No in F, status in G, validator in H.
+    3) Permanently locks rows once Validated == 'Yes'.
+    4) Deletes rows older than the 4-month window."""
     LOG("[WORK LOG] Checking logged farms against Kobo validations...")
     try:
         ws = sh.worksheet(SHEET_WORK_LOG_TAB)
@@ -1219,64 +1274,82 @@ def sync_work_log(sh, subs):
         LOG("[WORK LOG] _sys_work_log tab does not exist yet (no Docs clicks logged). Skipping.")
         return
 
-    # Kobo side: farm code -> (status, validated by) ONLY for farms that really have a validation
+    # Kobo side: farm code -> (status, validated by) from earliest validated submission
     kobo_valid, kobo_all = {}, set()
-    for s in subs:
+    for s in sorted(subs, key=lambda x: x.get("_id") or 0):
         code = _farm_key(s.get(FARM_CODE_KEY) or find_value(s, FARM_CODE_HINTS))
         if not code:
             continue
         kobo_all.add(code)
-        vs = s.get("_validation_status") or {}
-        label = vs.get("label") or vs.get("uid") or ""
-        if label:
-            kobo_valid[code] = (str(label), str(vs.get("by_whom") or ""))
+        label, by = _parse_validation_status(s.get("_validation_status"))
+        if label and code not in kobo_valid:
+            kobo_valid[code] = (label, by)
 
-    values = ws.get_all_values(value_render_option="UNFORMATTED_VALUE")
-    if len(values) < 2:
-        LOG("[WORK LOG] Log is empty. Nothing to check.")
-        return
+            values = ws.get_all_values(value_render_option="UNFORMATTED_VALUE")
+            if len(values) < 2:
+                LOG("[WORK LOG] Log is empty. Nothing to check.")
+                return
 
-    # first day of the oldest month we keep
-    t = datetime.now(CAIRO)
-    y, m = t.year, t.month - (WORK_LOG_MONTHS_TO_KEEP - 1)
-    while m < 1:
-        m, y = m + 12, y - 1
-    cutoff = datetime(y, m, 1).date()
+            # first day of the oldest month we keep
+            t = datetime.now(CAIRO)
+            y, m = t.year, t.month - (WORK_LOG_MONTHS_TO_KEEP - 1)
+            while m < 1:
+                m, y = m + 12, y - 1
+                cutoff = datetime(y, m, 1).date()
 
-    out = [["Validated", "Validation Status", "Validated By"]]
-    old_rows, not_in_kobo = [], []
-    n_valid = n_new = 0
-    for i, row in enumerate(values[1:], start=2):          # i = real row number in the sheet
-        row = list(row) + [""] * (8 - len(row))
-        d = _sheet_date(row[0])
-        if d and d < cutoff:
-            old_rows.append(i)
-            out.append(["", "", ""])                         # this row is about to be deleted
-            continue
-        code = _farm_key(row[2])
-        was_yes = str(row[5]).strip().lower() == "yes"
-        if was_yes:
-            out.append([row[5], row[6], row[7]])             # LOCKED: confirmed the first time, never changes again
-            n_valid += 1
-        elif code in kobo_valid:
-            label, by = kobo_valid[code]
-            out.append(["Yes", label, by])                   # first time Kobo shows a validation -> lock it
-            n_valid += 1
-            n_new += 1
-        else:
-            out.append(["", "", ""])
-            if code and code not in kobo_all:
-                not_in_kobo.append(str(row[2]))
+                # If duplicate rows already exist, prefer keeping the one that is already locked ("Yes"), else the first row
+                best_row_for_code = {}
+                for i, row in enumerate(values[1:], start=2):
+                    row_padded = list(row) + [""] * (8 - len(row))
+                    code = _farm_key(row_padded[2])
+                    if not code:
+                        continue
+                    is_locked = str(row_padded[5]).strip().lower() == "yes"
+                    if code not in best_row_for_code or (is_locked and not best_row_for_code[code][1]):
+                        best_row_for_code[code] = (i, is_locked)
 
-    if ws.col_count < 8:                                      # the tab was created with only 5 columns
-        ws.add_cols(8 - ws.col_count)
+                        out = [["Validated", "Validation Status", "Validated By"]]
+                        rows_to_delete, not_in_kobo = [], []
+                        n_valid = n_new = n_dups = 0
 
-    ws.update(range_name=f"F1:H{len(values)}", values=out)
+                        for i, row in enumerate(values[1:], start=2):          # i = real row number in the sheet
+                            row = list(row) + [""] * (8 - len(row))
+                            d = _sheet_date(row[0])
+                            if d and d < cutoff:
+                                rows_to_delete.append(i)
+                                out.append(["", "", ""])
+                                continue
 
-    if old_rows:                                              # delete old rows, bottom block first
-        blocks, start, prev = [], old_rows[0], old_rows[0]
-        for r in old_rows[1:]:
-            if r == prev + 1:
+                            code = _farm_key(row[2])
+                            if code and best_row_for_code.get(code, (i, False))[0] != i:
+                                rows_to_delete.append(i)                         # duplicate Farm Code -> remove extra row
+                                out.append(["", "", ""])
+                                n_dups += 1
+                                continue
+
+                            was_yes = str(row[5]).strip().lower() == "yes"
+                            if was_yes:
+                                out.append([row[5], row[6], row[7]])             # LOCKED: first validator is stored forever
+                                n_valid += 1
+                            elif code in kobo_valid:
+                                label, by = kobo_valid[code]
+                                out.append(["Yes", label, by])                   # first time Kobo shows a validation -> lock it
+                                n_valid += 1
+                                n_new += 1
+                            else:
+                                out.append(["No", "", ""])
+                                if code and code not in kobo_all:
+                                    not_in_kobo.append(str(row[2]))
+
+                                    if ws.col_count < 8:
+                                        ws.add_cols(8 - ws.col_count)
+
+                                        ws.update(range_name=f"F1:H{len(values)}", values=out)
+            if rows_to_delete:                                       # delete old/duplicate rows, bottom block first
+                rows_to_delete = sorted(set(rows_to_delete))
+                blocks, start, prev = [], rows_to_delete[0], rows_to_delete[0]
+            for r in rows_to_delete[1:]:
+                if r == prev + 1:
                 prev = r
             else:
                 blocks.append((start, prev))
@@ -1284,10 +1357,9 @@ def sync_work_log(sh, subs):
         blocks.append((start, prev))
         for a, b in reversed(blocks):
             ws.delete_rows(a, b)
-
-    total = len(values) - 1 - len(old_rows)
-    LOG(f"[WORK LOG] {total} logged click(s): {n_valid} validated in Kobo ({n_new} newly confirmed), "
-        f"{total - n_valid} still waiting for validation, {len(old_rows)} old row(s) deleted.")
+    total = len(values) - 1 - len(rows_to_delete)
+    LOG(f"[WORK LOG] {total} unique farm(s): {n_valid} validated ({n_new} newly confirmed), "
+        f"{total - n_valid} still 'No', {n_dups} duplicate(s) removed.")
     if not_in_kobo:
         LOG(f"[WORK LOG] Not found in Kobo at all (check the farm code): {', '.join(sorted(set(not_in_kobo))[:10])}")
 
@@ -1375,12 +1447,6 @@ def run_divide_work_pipeline():
     LOG("[STEP] Fetching submissions from KoboToolbox...")
     subs = get_submissions(server, light=True)
 
-    # 2. Confirm logged Docs clicks against Kobo validations (+ delete rows older than 4 months)
-    try:
-        sync_work_log(sh, subs)
-    except Exception as e:
-        LOG(f"[WORK LOG] ✗ Check failed ({type(e).__name__}: {e}). Dividing work anyway.")
-
     # 3. Read Team Modes from _sys_dist
     LOG("[STEP 2/4] Reading team modes from _sys_dist...")
     dist_ws, modes = read_team_modes(sh)
@@ -1451,8 +1517,11 @@ def start_divide_work() -> None:
             "pip install requests gspread google-auth"
         )
         return
-    if not os.path.exists(CREDENTIALS_FILE):
-        messagebox.showerror("Divide Work", "credentials.json was not found.\nPut it next to this file:\n" + CREDENTIALS_FILE)
+    if load_credentials_info() is None:
+        messagebox.showerror("Divide Work", "The Google key is missing from this build (pgs_key.py).")
+        return
+    if not pgs_store.get("kobo_token", ""):
+        messagebox.showerror("Divide Work", "Click the Kobo User button and paste your API token first.")
         return
     divide_btn.config(state="disabled", text="⏳ Running...")
     if not console_visible:
@@ -1468,4 +1537,5 @@ threading.Thread(
 
 root.protocol("WM_DELETE_WINDOW", lambda: (save_window_geometry(), root.destroy()))
 root.after(200, resize_window)
+root.after(800, lambda: prompt_kobo_token() if not pgs_store.get("kobo_token", "") else None)
 root.mainloop()

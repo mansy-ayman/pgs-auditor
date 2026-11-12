@@ -199,14 +199,15 @@ function getAnimalInfo(table) {
 function buildDocList(table) {
   const docs = [];
   const animals = getAnimalInfo(table);
-
+  const nl = table.map((r) => normAr(r.label));
   for (const [shortName, search, title, pink] of DOC_RULES) {
     // no animals on the farm -> skip the stable file question
     if (shortName === 'ملف الاسطبل' && !animals.has) continue;
 
     const needle = normAr(search);
-    for (const row of table) {
-      const lbl = normAr(row.label);
+    for (let k = 0; k < table.length; k++) {
+      const row = table[k];
+      const lbl = nl[k];
       const link = (row.link || '').trim();
       const val = (row.value || '').trim();
       const url = link.startsWith('http') ? link : val;
@@ -468,5 +469,13 @@ function sendTable() {
   });
 }
 
-setInterval(sendTable, 1500);
-setTimeout(sendTable, 1000);
+let debounceT = null;
+function scheduleSend() {
+  if (document.hidden) return;              // do nothing in background tabs
+  clearTimeout(debounceT);
+  debounceT = setTimeout(sendTable, 800);   // wait for the page to settle
+}
+new MutationObserver(scheduleSend).observe(document.body, { childList: true, subtree: true });
+document.addEventListener('visibilitychange', scheduleSend);
+setInterval(scheduleSend, 5000);            // slow safety net
+scheduleSend();

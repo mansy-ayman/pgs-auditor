@@ -3,14 +3,17 @@ const BASE = 'http://127.0.0.1:5000';
 const MAX_LOGS = 100;
 
 // ---------------- logging (shown in the popup) ----------------
+let logBuf = [], logTimer = null;
 function addLog(msg) {
-  const timestamp = new Date().toLocaleTimeString('en-US', { hour12: false });
-  chrome.storage.local.get(['gui_logs'], (res) => {
-    const logs = res.gui_logs || [];
-    logs.push(`[${timestamp}] ${msg}`);
-    if (logs.length > MAX_LOGS) logs.shift();
-    chrome.storage.local.set({ gui_logs: logs });
-  });
+  logBuf.push(`[${new Date().toLocaleTimeString('en-US', { hour12: false })}] ${msg}`);
+  if (logTimer) return;
+  logTimer = setTimeout(() => {
+    logTimer = null;
+    const batch = logBuf; logBuf = [];
+    chrome.storage.local.get(['gui_logs'], (res) => {
+      chrome.storage.local.set({ gui_logs: [...(res.gui_logs || []), ...batch].slice(-MAX_LOGS) });
+    });
+  }, 1000);
 }
 
 // ---------------- document queue ----------------
@@ -264,26 +267,26 @@ chrome.downloads.onChanged.addListener((delta) => {
 });
 
 // ---------------- poll the Python server ----------------
+let pollDelay = 3000, pollTimer = null, polling = false;
 function pollQueue() {
+  if (polling) return;
+  polling = true;
   fetch(`${BASE}/open-queue`)
-    .then((res) => {
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
-    })
+    .then((res) => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json(); })
     .then((data) => {
+      pollDelay = 3000;                                   // server is alive
       const docs = data.docs || data.documents || (Array.isArray(data) ? data : null);
       if (docs && docs.length > 0) {
         addLog(`📥 Received ${docs.length} documents from Python`);
         openAllDocs(docs);
       }
     })
-    .catch(() => { /* Python not running - ignore */ });
+    .catch(() => { pollDelay = Math.min(pollDelay * 2, 30000); })   // Python off: back off to 30 s
+    .finally(() => { polling = false; clearTimeout(pollTimer); pollTimer = setTimeout(pollQueue, pollDelay); });
 }
-
-// Alarm wakes the service worker; setInterval polls while it is awake
 chrome.alarms.create('poll_python_queue', { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'poll_python_queue') pollQueue(); });
-setInterval(pollQueue, 2000);
+pollQueue();
 
 // ---------------- messages ----------------
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -342,7 +345,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   chrome.alarms.create(CHECK_ALARM, { periodInMinutes: 1 });
   chrome.alarms.onAlarm.addListener((a) => { if (a.name === CHECK_ALARM) checkForNewVersion(); });
-  setInterval(checkForNewVersion, 60000);
 
   // After such a reload, pages that were already open lose their content script. Put it back so the
   // farm data keeps flowing to Python without pressing F5.

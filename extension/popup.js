@@ -16,7 +16,10 @@ const tiles = new Map();
 const getLat = (p) => (p && typeof p === 'object' && 'lat' in p) ? p.lat : (Array.isArray(p) ? p[0] : 0);
 const getLng = (p) => (p && typeof p === 'object' && 'lng' in p) ? p.lng : (Array.isArray(p) ? p[1] : 0);
 
-function getValidPoints() {
+let validCache = null;
+function getValidPoints() { return validCache || (validCache = computeValidPoints()); }
+
+function computeValidPoints() {
   const ext = (data && data.extracted_info) || {};
   let poly = (data && (data.farmPolygon || ext.farm_polygon)) || [];
   let soils = (data && (data.soilSamples || ext.soil_samples)) || [];
@@ -74,6 +77,7 @@ function render() {
         img.className = 'tile';
         img.alt = '';
         img.draggable = false;
+        img.decoding = 'async';
         img.onerror = () => { img.style.visibility = 'hidden'; };
         img.src = tileUrl(z, tx, ty);
         if (tilePane) tilePane.appendChild(img);
@@ -222,6 +226,7 @@ if (mapEl) {
 
 function applyData(d) {
   data = d;
+  validCache = null;
   currentDocs = d.docs || [];
   
   const { poly, soils } = getValidPoints();
