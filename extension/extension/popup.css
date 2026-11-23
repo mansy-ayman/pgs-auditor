@@ -1,0 +1,40 @@
+* { box-sizing: border-box; margin: 0; padding: 0; font-family: 'Segoe UI', Tahoma, Arial, sans-serif; }
+html, body { height: 100%; }
+body { background: #18181b; color: #f4f4f5; display: flex; flex-direction: column; overflow: hidden; }
+
+.bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-around; gap: 6px 16px; padding: 10px 12px;
+       background: #27272a; border-bottom: 1px solid #3f3f46; font-size: 13px; z-index: 10; }
+.stat { display: flex; align-items: center; gap: 5px; }
+.stat .k { color: #a1a1aa; font-weight: bold; }
+.stat b { color: #10b981; font-size: 15px; transition: color 0.3s; }
+.stat b.bad { color: #ef4444; } /* Turns red if area difference > 10% */
+
+#map { position: relative; flex: 1; overflow: hidden; background: #0b0b0d; direction: ltr;
+       cursor: grab; user-select: none; }
+#map.dragging { cursor: grabbing; }
+#tiles, #overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+#overlay { pointer-events: auto; }
+.tile { position: absolute; top: 0; left: 0; width: 256px; height: 256px; will-change: transform;
+        -webkit-user-drag: none; pointer-events: none; }
+
+.poly { fill: rgba(250, 204, 21, 0.2); stroke: #facc15; stroke-width: 2.5; stroke-linejoin: round; }
+.soil { fill: #ef4444; stroke: #fff; stroke-width: 1.5; }
+.soil-g { pointer-events: auto; cursor: pointer; }
+.soil-n { fill: #fff; font-size: 9px; font-weight: bold; text-anchor: middle; dominant-baseline: central; pointer-events: none; }
+
+#tip { position: absolute; display: none; background: rgba(24,24,27,.95); color: #f4f4f5; border: 1px solid #52525b;
+       border-radius: 6px; padding: 6px 10px; font-size: 12px; direction: rtl; line-height: 1.6; z-index: 5; }
+#tip small { color: #a1a1aa; direction: ltr; display: block; }
+
+.ctrl { position: absolute; top: 10px; left: 10px; display: flex; flex-direction: column; gap: 4px; z-index: 10; }
+.ctrl button { width: 30px; height: 30px; border: 1px solid #52525b; border-radius: 6px;
+               background: rgba(24, 24, 27, 0.85); color: #f4f4f5; font-size: 18px; cursor: pointer; }
+.ctrl button:hover { background: #3f3f46; }
+
+#notice { position: absolute; top: 10px; left: 50%; transform: translateX(-50%); display: none;
+          background: rgba(127, 29, 29, 0.9); color: #fecaca; padding: 6px 12px; border-radius: 6px;
+          font-size: 12px; direction: rtl; pointer-events: none; z-index: 10; }
+#attr { position: absolute; bottom: 0; left: 0; right: 0; padding: 2px 6px; font-size: 9px;
+        color: #e4e4e7; background: rgba(0, 0, 0, 0.55); pointer-events: none; z-index: 2; }
+
+#empty { display: none; flex: 1; align-items: center; justify-content: center; color: #a1a1aa; font-size: 14px; }

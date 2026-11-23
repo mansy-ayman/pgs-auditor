@@ -1,0 +1,62 @@
+{
+  "manifest_version": 3,
+  "name": "KoBo Document & Farm Map Extension",
+  "version": "1.2.14",
+  "description": "Extracts KoBo farm data, opens documents, and provides manual tree-count review.",
+  "permissions": [
+    "storage",
+    "tabs",
+    "activeTab",
+    "alarms",
+    "scripting",
+    "downloads"
+  ],
+  "host_permissions": [
+    "http://127.0.0.1:5000/*",
+    "https://server.arcgisonline.com/*",
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    },
+    "default_title": "PGS SINTENAL Farm Audit"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://kf.kobotoolbox.org/*"
+      ],
+      "js": [
+        "content.js"
+      ]
+    }
+  ],
+  "web_accessible_resources": [
+    {
+      "resources": [
+        "popup.html",
+        "popup.css",
+        "popup.js",
+        "viewer.html",
+        "viewer.js"
+      ],
+      "matches": [
+        "<all_urls>"
+      ]
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

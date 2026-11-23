@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Manual Tree Count</title>
+  <link rel="stylesheet" href="tree-review.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="farm-code" id="farmCode">Loading farm...</div>
+    <div class="count"><span>Tree Count</span><strong id="liveCount">0</strong></div>
+    <div class="tools">
+      <button id="addMode" class="active">＋ Add Tree</button>
+      <button id="removeMode">－ Remove Tree</button>
+      <button id="undo" disabled>Undo</button>
+      <button id="redo" disabled>Redo</button>
+      <button id="fit">Fit</button>
+      <label>Zoom <input id="zoom" type="range" min="0.5" max="4" step="0.1" value="1"><b id="zoomValue">100%</b></label>
+      <button id="finish" disabled>Finish</button>
+    </div>
+  </header>
+  <main>
+    <p id="status">Right-click a tree to add a marker. Click a marker to remove it.</p>
+    <div id="imagePlaceholder">Satellite image is not ready yet. Wait for it to load.</div>
+    <div id="imageStage"><img id="satellite" alt="Farm satellite image" draggable="false"><svg id="markers"></svg></div>
+  </main>
+  <script src="tree-review.js"></script>
+</body>
+</html>
