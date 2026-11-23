@@ -431,7 +431,7 @@ def format_problems(problems: list) -> str:
     return ("- " + " -- ".join(clean) + " -") if clean else ""
 
 # -------------------- Farm history (last 15 farms) -------------------- #
-HISTORY_MAX = 15
+HISTORY_MAX = 5
 farm_history = []   # newest first: [{"code": "...", "gov": "..."}]
 
 def load_history() -> None:
@@ -538,6 +538,7 @@ def send_docs_to_extension():
 
 # -------------------- Manual tree review handoff -------------------- #
 _tree_review_queue = []
+_last_table_rows = []   # latest KoBo submission table, used by the console copy button
 _tree_review_sessions = {}
 _tree_review_active_code = ""
 _tree_review_last_queued_code = ""
@@ -593,6 +594,7 @@ logging.getLogger("werkzeug").setLevel(logging.ERROR)
 
 @app.route('/kobo-data', methods=['POST'])
 def receive_kobo_data():
+    global _last_table_rows
     try:
         data = request.get_json(force=True, silent=True) or {}
         table = data.get('table', [])
@@ -602,6 +604,7 @@ def receive_kobo_data():
         soil_samples = extracted.get('soil_samples', [])
         area_faddan = extracted.get('area_faddan', 0)
 
+        _last_table_rows = table
         process_incoming_payload(data)
         return jsonify({"status": "success", "message": "Data received successfully"}), 200
 
@@ -657,43 +660,44 @@ def tree_counter_result():
 
     with _tree_review_lock:
         session = _tree_review_sessions.get(code)
-    if not session:
-        return jsonify({"status": "error", "message": "Unknown farm review"}), 404
-    submitted = int(session.get("submitted_total", 0))
-    # Over the checklist count by even one is a mismatch. Up to 10% below it is accepted.
-    too_many = manual_count > submitted
-    too_few = submitted > 0 and manual_count < submitted and ((submitted - manual_count) / submitted) > 0.10
-    mismatch = too_many or too_few
-    tree_problem = (
-        f"عدد الأشجار المعدودة {manual_count}، والعدد في الاستمارة {submitted}. برجاء التصحيح"
-        if mismatch else ""
-    )
-    with _tree_review_lock:
-        session["manual_count"] = manual_count
-        session["tree_checked"] = True
-        session["tree_problem"] = tree_problem
-        _tree_review_sessions[code] = session
-        active = (_tree_review_active_code == code)
-    if active:
-        def update_tree_status():
-            problems = list(session.get("base_problems", []))
+        if not session:
+            return jsonify({"status": "error", "message": "Unknown farm review"}), 404
+        submitted = int(session.get("submitted_total", 0))
+        # Over the checklist count by even one is a mismatch. Up to 10% below it is accepted.
+        too_many = manual_count > submitted
+        too_few = submitted > 0 and manual_count < submitted and ((submitted - manual_count) / submitted) > 0.10
+        mismatch = too_many or too_few
+        tree_problem = (
+            f"عدد الأشجار المعدودة {manual_count}، والعدد في الاستمارة {submitted}. برجاء التصحيح"
+            if mismatch else ""
+        )
+        with _tree_review_lock:
+            session["manual_count"] = manual_count
+            session["tree_checked"] = True
+            session["tree_problem"] = tree_problem
+            _tree_review_sessions[code] = session
+            active = (_tree_review_active_code == code)
+            if active:
+                def update_tree_status():
+                    problems = list(session.get("base_problems", []))
+                    if tree_problem:
+                        problems.insert(0, tree_problem)
+                    display = format_problems(problems)
+                    set_rule_text(display, bool(problems))
+                    log_to_console(
+                        f"🌳 Tree review completed for {code}: "
+                        f"manual={manual_count}, checklist={submitted}; "
+                        f"{'MISMATCH' if mismatch else 'OK'}"
+                    )
+                root.after(0, update_tree_status)   # Tk must be updated from the main thread
 
-            if tree_problem:
-                # Tree count mismatch: add it to the problems.
-                problems.insert(0, tree_problem)
-                display = format_problems(problems)
-            else:
-                # Matching tree count is NOT a problem.
-                # Show only unrelated checklist problems.
-                display = format_problems(problems) if problems else ""
-
-                set_rule_text(display, bool(problems))
-
-                log_to_console(
-                    f"🌳 Tree review completed for {code}: "
-                    f"manual={manual_count}, checklist={submitted}; "
-                    f"{'MISMATCH' if mismatch else 'OK'}"
-                )
+            return jsonify({
+                "status": "success",
+                "mismatch": mismatch,
+                "tree_problem": tree_problem,
+                "manual_count": manual_count,
+                "checklist_count": submitted,
+            }), 200
 
 
 @app.after_request
@@ -948,7 +952,7 @@ def show_history() -> None:
             pass
 
     history_win = tk.Toplevel(root)
-    history_win.title("History - last 15 farms")
+    history_win.title("History - last 5 farms")
     history_win.configure(bg=BG)
     history_win.attributes("-topmost", True)
     history_win.geometry(load_history_geometry())
@@ -996,7 +1000,7 @@ btn_row = tk.Frame(root, bg=BG)
 btn_row.grid(row=3, column=0, sticky="ew", padx=8, pady=(0, 6))
 btn_row.columnconfigure(0, weight=1)
 
-hist_btn = tk.Button(btn_row, text="🕘  History (last 15 farms)", font=FONT, bg="#34495e", fg="white",
+hist_btn = tk.Button(btn_row, text="🕘  History (last 5 farms)", font=FONT, bg="#34495e", fg="white",
                      activebackground="#3d566e", activeforeground="white", relief="flat", bd=0,
                      pady=4, cursor="hand2", command=show_history)
 hist_btn.grid(row=0, column=0, sticky="ew")
@@ -1059,10 +1063,33 @@ def toggle_console() -> None:
         console_btn.config(text="🖥 Console")
     resize_window()
 
+def copy_current_table() -> None:
+    """Copies the latest submission table to the clipboard and prints every row in the console."""
+    rows = _last_table_rows
+    if not rows:
+        log_to_console("⚠️ No submission table yet - open a KoBo submission first.")
+        return
+    lines = ["#\tLabel\tValue\tLink"] + [
+        f"{r.get('index', '')}\t{r.get('label', '')}\t{r.get('value', '')}\t{r.get('link', '')}" for r in rows
+    ]
+    root.clipboard_clear()
+    root.clipboard_append("\n".join(lines))
+    root.update()
+    log_to_console(f"📋 Table copied: {len(rows)} rows for {_last_farm_code or 'current farm'}")
+    for r in rows[:300]:
+        value = str(r.get("value", "")).replace("\n", " ")
+        log_to_console(f"{r.get('index', ''):>3} | {r.get('label', '')} | {value}")
+
 console_btn = tk.Button(rule_header, text="🖥 Console", font=("Segoe UI", 8, "bold"), bg="#34495e", fg="white",
                         activebackground="#3d566e", activeforeground="white", relief="flat", bd=0,
                         padx=8, cursor="hand2", command=toggle_console)
 console_btn.grid(row=0, column=3, sticky="e", padx=(4, 0))
+
+table_btn = tk.Button(rule_header, text="📋 Table", font=("Segoe UI", 8, "bold"), bg="#7c3aed", fg="white",
+activebackground="#8b5cf6", activeforeground="white", relief="flat", bd=0,
+padx=8, cursor="hand2", command=copy_current_table)
+table_btn.grid(row=0, column=4, sticky="e", padx=(4, 0))
+
 def open_tree_results_folder() -> None:
     """Open the local folder containing satellite and DeepForest diagnostics."""
     folder = os.path.join(SCRIPT_DIR, "farm_satellite_images")
@@ -1089,20 +1116,6 @@ def trigger_tree_count_now() -> None:
         args=(_last_farm_code, _last_farm_polygon),
         daemon=True
     ).start()
-
-trees_btn = tk.Button(
-    rule_header, text="🌳 Count Trees", font=("Segoe UI", 8, "bold"), bg="#16a34a", fg="white",
-    activebackground="#22c55e", activeforeground="white", relief="flat", bd=0,
-    padx=8, cursor="hand2", command=trigger_tree_count_now
-)
-trees_btn.grid(row=0, column=4, sticky="e", padx=(4, 0))
-
-results_btn = tk.Button(
-    rule_header, text="📁 Results", font=("Segoe UI", 8, "bold"), bg="#475569", fg="white",
-    activebackground="#64748b", activeforeground="white", relief="flat", bd=0,
-    padx=8, cursor="hand2", command=open_tree_results_folder
-)
-results_btn.grid(row=0, column=5, sticky="e", padx=(4, 0))
 
 # -------------------- Google Satellite + DeepForest Tree Counter -------------------- #
 SAT_ZOOM = 20
