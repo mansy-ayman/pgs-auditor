@@ -1,0 +1,31 @@
+Kobo Bridge DeepForest run: EG_3328
+Started: 2026-11-23T06:07:29
+
+[2026-11-23 06:07:29] 🚀 [EG_3328] DeepForest worker started; polygon_points=8
+[2026-11-23 06:07:29] 🗺️ Expanding image download boundary by 5 metres; detections will be filtered against the ORIGINAL farm boundary.
+[2026-11-23 06:07:29] ℹ️ Zoom 20 requires 255 tiles; stepping down to zoom 19.
+[2026-11-23 06:07:29] 📡 Downloading 72 Google Satellite tiles at Zoom 19...
+[2026-11-23 06:07:35] 🛰️ Saved clean satellite input: 2049x1781px, zoom=19.
+[2026-11-23 06:07:35] 🗺️ Saved boundary preview: yellow=+5m download boundary, cyan=actual farm boundary: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_3328\02_satellite_with_boundaries.png
+[2026-11-23 06:07:35] 📁 Farm diagnostic folder: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_3328
+[2026-11-23 06:07:35] 🌲 Loading pretrained DeepForest model (first run may download model weights)...
+[2026-11-23 06:07:35] 🌲 Running DeepForest: patch_size=800, overlap=0.25, NMS IoU=0.15.
+[2026-11-23 06:08:01] 🌲 DeepForest returned 26 raw tree-crown boxes.
+[2026-11-23 06:08:01] 📐 Original-boundary filter retained 11 / 26 detections.
+[2026-11-23 06:08:02] 🖼️ Saved all-detections image: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_3328\03_deepforest_all_detections.png
+[2026-11-23 06:08:02] 🖼️ Saved inside-farm image: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_3328\04_trees_inside_farm.png
+[2026-11-23 06:08:02] 📄 Saved detection CSV files: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_3328\deepforest_all_detections.csv and C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_3328\deepforest_inside_farm.csv
+[2026-11-23 06:08:02] ✅ DONE in 33.2s — DeepForest raw=26, inside original farm=11.
+
+SUMMARY
+farm_code=EG_3328
+image_size=2049x1781
+zoom=19
+model=weecology/deepforest-tree
+patch_size=800
+patch_overlap=0.25
+iou_threshold=0.15
+raw_detections=26
+inside_original_farm=11
+elapsed_seconds=33.2
+[2026-11-23 06:08:02] 🗂️ Diagnostic retention: 20/20 latest farm folders kept.

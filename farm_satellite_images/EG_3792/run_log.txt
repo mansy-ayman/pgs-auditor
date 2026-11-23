@@ -1,0 +1,30 @@
+Kobo Bridge DeepForest run: EG_3792
+Started: 2026-11-23T06:22:58
+
+[2026-11-23 06:22:58] 🚀 [EG_3792] DeepForest worker started; polygon_points=7
+[2026-11-23 06:22:58] 🗺️ Expanding image download boundary by 5 metres; detections will be filtered against the ORIGINAL farm boundary.
+[2026-11-23 06:22:58] 📡 Downloading 90 Google Satellite tiles at Zoom 20...
+[2026-11-23 06:23:06] 🛰️ Saved clean satellite input: 2060x2182px, zoom=20.
+[2026-11-23 06:23:06] 🗺️ Saved boundary preview: yellow=+5m download boundary, cyan=actual farm boundary: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_3792\02_satellite_with_boundaries.png
+[2026-11-23 06:23:06] 📁 Farm diagnostic folder: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_3792
+[2026-11-23 06:23:06] 🌲 Loading pretrained DeepForest model (first run may download model weights)...
+[2026-11-23 06:23:06] 🌲 Running DeepForest: patch_size=800, overlap=0.25, NMS IoU=0.15.
+[2026-11-23 06:23:40] 🌲 DeepForest returned 53 raw tree-crown boxes.
+[2026-11-23 06:23:40] 📐 Original-boundary filter retained 6 / 53 detections.
+[2026-11-23 06:23:41] 🖼️ Saved all-detections image: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_3792\03_deepforest_all_detections.png
+[2026-11-23 06:23:41] 🖼️ Saved inside-farm image: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_3792\04_trees_inside_farm.png
+[2026-11-23 06:23:41] 📄 Saved detection CSV files: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_3792\deepforest_all_detections.csv and C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_3792\deepforest_inside_farm.csv
+[2026-11-23 06:23:41] ✅ DONE in 43.6s — DeepForest raw=53, inside original farm=6.
+
+SUMMARY
+farm_code=EG_3792
+image_size=2060x2182
+zoom=20
+model=weecology/deepforest-tree
+patch_size=800
+patch_overlap=0.25
+iou_threshold=0.15
+raw_detections=53
+inside_original_farm=6
+elapsed_seconds=43.6
+[2026-11-23 06:23:41] 🗂️ Diagnostic retention: 20/20 latest farm folders kept.

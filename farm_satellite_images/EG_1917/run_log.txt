@@ -1,0 +1,49 @@
+Kobo Bridge DeepForest run: EG_1917
+Started: 2026-11-23T05:58:08
+
+[2026-11-23 05:58:08] 🚀 [EG_1917] DeepForest worker started; polygon_points=4
+[2026-11-23 05:58:08] 🗺️ Expanding image download boundary by 5 metres; detections will be filtered against the ORIGINAL farm boundary.
+[2026-11-23 05:58:08] 📡 Downloading 96 Google Satellite tiles at Zoom 20...
+[2026-11-23 05:58:19] 🛰️ Saved clean satellite input: 1771x2765px, zoom=20.
+[2026-11-23 05:58:19] 🗺️ Saved boundary preview: yellow=+5m download boundary, cyan=actual farm boundary: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_1917\02_satellite_with_boundaries.png
+[2026-11-23 05:58:19] 📁 Farm diagnostic folder: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_1917
+[2026-11-23 05:58:19] 🌲 Loading pretrained DeepForest model (first run may download model weights)...
+[2026-11-23 05:58:19] 🌲 Running DeepForest: patch_size=800, overlap=0.25, NMS IoU=0.15.
+[2026-11-23 05:58:50] 🌲 DeepForest returned 108 raw tree-crown boxes.
+[2026-11-23 05:58:50] 📐 Original-boundary filter retained 11 / 108 detections.
+[2026-11-23 05:58:52] 🖼️ Saved all-detections image: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_1917\03_deepforest_all_detections.png
+[2026-11-23 05:58:52] 🖼️ Saved inside-farm image: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_1917\04_trees_inside_farm.png
+[2026-11-23 05:58:52] 📄 Saved detection CSV files: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_1917\deepforest_all_detections.csv and C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_1917\deepforest_inside_farm.csv
+[2026-11-23 05:58:52] ✅ DONE in 59.8s — DeepForest raw=108, inside original farm=11.
+
+SUMMARY
+farm_code=EG_1917
+image_size=1771x2765
+zoom=20
+model=weecology/deepforest-tree
+patch_size=800
+patch_overlap=0.25
+iou_threshold=0.15
+raw_detections=108
+inside_original_farm=11
+elapsed_seconds=59.8
+[2026-11-23 05:58:52] 🗂️ Diagnostic retention: 20/20 latest farm folders kept.
+[2026-11-23 06:00:01] 🌲 DeepForest returned 108 raw tree-crown boxes.
+[2026-11-23 06:00:01] 📐 Original-boundary filter retained 11 / 108 detections.
+[2026-11-23 06:00:02] 🖼️ Saved all-detections image: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_1917\03_deepforest_all_detections.png
+[2026-11-23 06:00:02] 🖼️ Saved inside-farm image: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_1917\04_trees_inside_farm.png
+[2026-11-23 06:00:02] 📄 Saved detection CSV files: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_1917\deepforest_all_detections.csv and C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_1917\deepforest_inside_farm.csv
+[2026-11-23 06:00:02] ✅ DONE in 114.2s — DeepForest raw=108, inside original farm=11.
+
+SUMMARY
+farm_code=EG_1917
+image_size=1771x2765
+zoom=20
+model=weecology/deepforest-tree
+patch_size=800
+patch_overlap=0.25
+iou_threshold=0.15
+raw_detections=108
+inside_original_farm=11
+elapsed_seconds=114.2
+[2026-11-23 06:00:02] 🗂️ Diagnostic retention: 20/20 latest farm folders kept.

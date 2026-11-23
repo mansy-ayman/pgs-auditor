@@ -4,7 +4,6 @@ import json
 import threading
 import re
 import urllib.parse
-import webbrowser
 import tkinter as tk
 import math
 import pgs_store
@@ -13,13 +12,19 @@ from datetime import datetime, timezone, timedelta
 import time
 from collections import Counter
 from urllib.parse import quote
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-
+import io
+import requests
+from concurrent.futures import ThreadPoolExecutor
+try:
+    from PIL import Image, ImageDraw
+    PIL_OK = True
+except ImportError:
+    PIL_OK = False
 # Divide Work needs 3 extra libraries. If they are missing the main tool still starts normally
 # and only the Divide Work button explains what to install (pip install requests gspread google-auth).
 try:
-    import requests
     import gspread
     from google.oauth2.service_account import Credentials
     DW_LIBS_OK = True
@@ -472,22 +477,25 @@ TARGET_DOC_RULES = [
 def extract_attachments(table: list) -> list:
     attachments = []
     file_exts = (".jpg", ".jpeg", ".png", ".pdf", ".mp4", ".doc", ".docx", ".xlsx")
-    
+
     for rule_key, rule_search, header_title, is_pink in TARGET_DOC_RULES:
         for row in table:
             lbl = norm(row.get("label"))
             val = str(row.get("value", "")).strip()
             link = str(row.get("link", "")).strip()
             target_url = link if link.startswith("http") else val
-            
-            if norm(rule_search) in lbl and target_url and (link.startswith("http") or any(target_url.lower().endswith(ext) for ext in file_exts)):
+
+            if norm(rule_search) in lbl and target_url and (
+                link.startswith("http")
+                or any(target_url.lower().endswith(ext) for ext in file_exts)
+            ):
                 if not any(a["url"] == target_url for a in attachments):
                     attachments.append({
                         "label": row.get("label", "").strip(),
                         "short_name": rule_key,
                         "header_title": header_title,
                         "is_pink": is_pink,
-                        "url": target_url
+                        "url": target_url,
                     })
                 break
     return attachments
@@ -528,6 +536,53 @@ def send_docs_to_extension():
         return
     threading.Thread(target=log_docs_click, args=(code, gov, kobo_user), daemon=True).start()
 
+# -------------------- Manual tree review handoff -------------------- #
+_tree_review_queue = []
+_tree_review_sessions = {}
+_tree_review_active_code = ""
+_tree_review_last_queued_code = ""
+_tree_review_lock = threading.Lock()
+
+
+def _tree_block_from_table(table):
+    """Return ordered tree-section rows; never pick animal/equipment العدد rows."""
+    start = None
+    for i, row in enumerate(table):
+        label = norm(row.get("label", ""))
+        if label == norm("بيانات الاشجار") or label == norm("هل توجد اشجار فى المزرعه"):
+            start = i
+            break
+    if start is None:
+        return []
+    end = len(table)
+    stop_labels = ("هل توجد حيوانات فى المزرعه", "بيانات الحيوانات", "نوع التربة")
+    for i in range(start + 1, len(table)):
+        label = norm(table[i].get("label", ""))
+        if any(norm(stop) in label for stop in stop_labels):
+            end = i
+            break
+    return [
+        {"label": str(row.get("label", "")).strip(), "value": str(row.get("value", "")).strip()}
+        for row in table[start:end]
+        if str(row.get("label", "")).strip() or str(row.get("value", "")).strip()
+    ]
+
+
+def _tree_counts_from_rows(rows):
+    counts = []
+    for row in rows:
+        if norm(row.get("label", "")) == norm("العدد"):
+            value = to_float(row.get("value", ""))
+            if value is not None and value >= 0:
+                counts.append(int(round(value)))
+    return counts
+
+
+def _safe_farm_folder(code):
+    safe = re.sub(r'[\\/:*?"<>|\s]+', "_", str(code or "").strip()).strip("_")
+    return safe or "farm"
+
+
 # -------------------- Flask Server -------------------- #
 app = Flask(__name__)
 CORS(app)
@@ -560,6 +615,86 @@ def open_queue():
     global pending_open
     docs, pending_open = pending_open, None
     return jsonify({"docs": docs or []})
+
+@app.route('/tree-counter/open-queue', methods=['GET'])
+def tree_counter_open_queue():
+    """One-shot queue: background extension opens a review tab for each new farm code."""
+    global _tree_review_queue
+    with _tree_review_lock:
+        jobs, _tree_review_queue = _tree_review_queue, []
+    return jsonify({"jobs": jobs})
+
+
+@app.route('/tree-counter/session', methods=['GET'])
+def tree_counter_session():
+    code = str(request.args.get('farm_code', '')).strip()
+    with _tree_review_lock:
+        session = _tree_review_sessions.get(code)
+    if not session:
+        return jsonify({"error": "Farm review session not found"}), 404
+    return jsonify(session)
+
+
+@app.route('/tree-counter/image/<path:farm_code>', methods=['GET'])
+def tree_counter_image(farm_code):
+    path = os.path.join(SAT_DIR, _safe_farm_folder(farm_code), "01_satellite_input_clean.png")
+    if not os.path.isfile(path):
+        return jsonify({"error": "Satellite image is not ready yet"}), 404
+    return send_file(path, mimetype="image/png", conditional=True)
+
+
+@app.route('/tree-counter/result', methods=['POST'])
+def tree_counter_result():
+    global _tree_review_active_code
+    data = request.get_json(force=True, silent=True) or {}
+    code = str(data.get("farm_code", "")).strip()
+    try:
+        manual_count = int(data.get("manual_count"))
+    except (TypeError, ValueError):
+        return jsonify({"status": "error", "message": "Invalid manual count"}), 400
+    if not code or manual_count < 0:
+        return jsonify({"status": "error", "message": "Farm code/count is invalid"}), 400
+
+    with _tree_review_lock:
+        session = _tree_review_sessions.get(code)
+    if not session:
+        return jsonify({"status": "error", "message": "Unknown farm review"}), 404
+    submitted = int(session.get("submitted_total", 0))
+    # Over the checklist count by even one is a mismatch. Up to 10% below it is accepted.
+    too_many = manual_count > submitted
+    too_few = submitted > 0 and manual_count < submitted and ((submitted - manual_count) / submitted) > 0.10
+    mismatch = too_many or too_few
+    tree_problem = (
+        f"عدد الأشجار المعدودة {manual_count}، والعدد في الاستمارة {submitted}. برجاء التصحيح"
+        if mismatch else ""
+    )
+    with _tree_review_lock:
+        session["manual_count"] = manual_count
+        session["tree_checked"] = True
+        session["tree_problem"] = tree_problem
+        _tree_review_sessions[code] = session
+        active = (_tree_review_active_code == code)
+    if active:
+        def update_tree_status():
+            problems = list(session.get("base_problems", []))
+
+            if tree_problem:
+                # Tree count mismatch: add it to the problems.
+                problems.insert(0, tree_problem)
+                display = format_problems(problems)
+            else:
+                # Matching tree count is NOT a problem.
+                # Show only unrelated checklist problems.
+                display = format_problems(problems) if problems else ""
+
+                set_rule_text(display, bool(problems))
+
+                log_to_console(
+                    f"🌳 Tree review completed for {code}: "
+                    f"manual={manual_count}, checklist={submitted}; "
+                    f"{'MISMATCH' if mismatch else 'OK'}"
+                )
+
 
 @app.after_request
 def after_request(response):
@@ -896,7 +1031,7 @@ def log_to_console(msg: str) -> None:
                 console_text.insert(tk.END, msg + "\n")
                 if int(console_text.index("end-1c").split(".")[0]) > 500:
                     console_text.delete("1.0", "100.0")
-                    console_text.see(tk.END)
+                console_text.see(tk.END)
         except Exception:
             pass
     root.after(0, append)
@@ -928,6 +1063,503 @@ console_btn = tk.Button(rule_header, text="🖥 Console", font=("Segoe UI", 8, "
                         activebackground="#3d566e", activeforeground="white", relief="flat", bd=0,
                         padx=8, cursor="hand2", command=toggle_console)
 console_btn.grid(row=0, column=3, sticky="e", padx=(4, 0))
+def open_tree_results_folder() -> None:
+    """Open the local folder containing satellite and DeepForest diagnostics."""
+    folder = os.path.join(SCRIPT_DIR, "farm_satellite_images")
+    os.makedirs(folder, exist_ok=True)
+    try:
+        if hasattr(os, "startfile"):
+            os.startfile(folder)
+        else:
+            import subprocess
+            subprocess.Popen(["explorer", folder])
+    except Exception as exc:
+        messagebox.showerror("Tree results folder", f"Could not open the folder:\n{folder}\n\n{exc}")
+
+
+def trigger_tree_count_now() -> None:
+    if not console_visible:
+        toggle_console()
+    if not _last_farm_polygon or len(_last_farm_polygon) < 3:
+        log_to_console("⚠️ No farm loaded yet — open a submission in KoBo first.")
+        return
+    log_to_console(f"🔄 Manual run started for {_last_farm_code or 'current farm'}...")
+    threading.Thread(
+        target=save_farm_satellite_image,
+        args=(_last_farm_code, _last_farm_polygon),
+        daemon=True
+    ).start()
+
+trees_btn = tk.Button(
+    rule_header, text="🌳 Count Trees", font=("Segoe UI", 8, "bold"), bg="#16a34a", fg="white",
+    activebackground="#22c55e", activeforeground="white", relief="flat", bd=0,
+    padx=8, cursor="hand2", command=trigger_tree_count_now
+)
+trees_btn.grid(row=0, column=4, sticky="e", padx=(4, 0))
+
+results_btn = tk.Button(
+    rule_header, text="📁 Results", font=("Segoe UI", 8, "bold"), bg="#475569", fg="white",
+    activebackground="#64748b", activeforeground="white", relief="flat", bd=0,
+    padx=8, cursor="hand2", command=open_tree_results_folder
+)
+results_btn.grid(row=0, column=5, sticky="e", padx=(4, 0))
+
+# -------------------- Google Satellite + DeepForest Tree Counter -------------------- #
+SAT_ZOOM = 20
+SAT_BUFFER_METERS = 5.0
+SAT_PADDING_RATIO = 0.08
+SAT_MAX_FARMS = 20
+SAT_DIR = os.path.join(SCRIPT_DIR, "farm_satellite_images")
+
+# DeepForest's pretrained crown detector is run on overlapping windows.
+# 800 px is a practical starting point for this high-resolution satellite mosaic.
+DEEPFOREST_PATCH_SIZE = 800
+DEEPFOREST_PATCH_OVERLAP = 0.25
+DEEPFOREST_IOU_THRESHOLD = 0.15
+
+_last_sat_signature = None
+_last_farm_code = ""
+_last_farm_polygon = []
+_DEEPFOREST_MODEL = None
+_DEEPFOREST_MODEL_LOCK = threading.Lock()
+_DEEPFOREST_INFERENCE_LOCK = threading.Lock()
+
+
+def polygon_from_table(table: list) -> list[tuple[float, float]]:
+    """Fallback parser if farm_polygon wasn't sent in extracted_info."""
+    pts = []
+    for row in table:
+        lbl = L(row)
+        if norm("ارسم") in lbl or norm("حدود") in lbl:
+            val = str(row.get("value") or "")
+            for m in re.finditer(r"(-?\d+\.\d{4,})\s+(-?\d+\.\d{4,})", val):
+                lat, lng = float(m.group(1)), float(m.group(2))
+                if 20 <= lat <= 33 and 24 <= lng <= 38:
+                    pts.append((lat, lng))
+    if len(pts) > 3 and pts[0] == pts[-1]:
+        pts.pop()
+    return pts
+
+
+def expand_polygon_meters(poly: list[tuple[float, float]], offset_m: float = 5.0) -> list[tuple[float, float]]:
+    """Expand a (latitude, longitude) polygon outwards by offset_m metres."""
+    pts = [(float(p[0]), float(p[1])) for p in poly if p and len(p) >= 2]
+    if len(pts) > 3 and pts[0] == pts[-1]:
+        pts.pop()
+    n = len(pts)
+    if n < 3:
+        return pts
+
+    avg_lat = sum(p[0] for p in pts) / n
+    avg_lng = sum(p[1] for p in pts) / n
+    m_lat = 111132.92
+    m_lng = 111412.84 * math.cos(math.radians(avg_lat))
+    xy = [((lng - avg_lng) * m_lng, (lat - avg_lat) * m_lat) for lat, lng in pts]
+    area2 = sum(
+        xy[i][0] * xy[(i + 1) % n][1] - xy[(i + 1) % n][0] * xy[i][1]
+        for i in range(n)
+    )
+    sign = 1.0 if area2 >= 0 else -1.0
+
+    offset_edges = []
+    for i in range(n):
+        x1, y1 = xy[i]
+        x2, y2 = xy[(i + 1) % n]
+        dx, dy = x2 - x1, y2 - y1
+        length = math.hypot(dx, dy)
+        if length < 1e-9:
+            continue
+        nx, ny = sign * (dy / length), sign * (-dx / length)
+        offset_edges.append(((x1 + nx * offset_m, y1 + ny * offset_m), (dx, dy)))
+
+    if len(offset_edges) < 3:
+        return pts
+
+    expanded_xy = []
+    for i in range(len(offset_edges)):
+        p1, d1 = offset_edges[(i - 1) % len(offset_edges)]
+        p2, d2 = offset_edges[i]
+        cross = d1[0] * d2[1] - d1[1] * d2[0]
+        if abs(cross) < 1e-6:
+            ix, iy = p2
+        else:
+            t = ((p2[0] - p1[0]) * d2[1] - (p2[1] - p1[1]) * d2[0]) / cross
+            ix, iy = p1[0] + t * d1[0], p1[1] + t * d1[1]
+            orig_x, orig_y = xy[i % n]
+            dist = math.hypot(ix - orig_x, iy - orig_y)
+            if dist > offset_m * 3.0:
+                scale = (offset_m * 3.0) / dist
+                ix = orig_x + (ix - orig_x) * scale
+                iy = orig_y + (iy - orig_y) * scale
+        expanded_xy.append((ix, iy))
+
+    return [(avg_lat + y / m_lat, avg_lng + x / m_lng) for x, y in expanded_xy]
+
+
+def _lat_lng_to_pixel(lat: float, lng: float, zoom: int) -> tuple[float, float]:
+    n = 2 ** zoom
+    x_tile = (lng + 180.0) / 360.0 * n
+    lat_rad = math.radians(lat)
+    y_tile = (1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n
+    return x_tile * 256.0, y_tile * 256.0
+
+
+def _fetch_google_sat_tile(args):
+    tx, ty, zoom = args
+    url = f"https://mt1.google.com/vt/lyrs=s&x={tx}&y={ty}&z={zoom}"
+    try:
+        response = requests.get(url, headers={"User-Agent": "Mozilla/5.0"}, timeout=15)
+        if response.status_code == 200 and response.content:
+            return tx, ty, Image.open(io.BytesIO(response.content)).convert("RGBA")
+    except Exception:
+        pass
+    return tx, ty, None
+
+
+def _point_in_poly_xy(x: float, y: float, poly_xy: list[tuple[float, float]]) -> bool:
+    """Ray-casting point-in-polygon test in image pixel coordinates."""
+    inside = False
+    j = len(poly_xy) - 1
+    for i in range(len(poly_xy)):
+        xi, yi = poly_xy[i]
+        xj, yj = poly_xy[j]
+        if ((yi > y) != (yj > y)) and (x < (xj - xi) * (y - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _tree_log(log_path: str, message: str) -> None:
+    """Write every tree-counter stage to both the Tk console and a farm log file."""
+    log_to_console(message)
+    try:
+        with open(log_path, "a", encoding="utf-8") as handle:
+            handle.write(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] {message}\n")
+    except OSError:
+        pass
+
+
+def _get_deepforest_model():
+    """Load the official pretrained DeepForest tree model once per application run."""
+    global _DEEPFOREST_MODEL
+    if _DEEPFOREST_MODEL is not None:
+        return _DEEPFOREST_MODEL
+
+    with _DEEPFOREST_MODEL_LOCK:
+        if _DEEPFOREST_MODEL is not None:
+            return _DEEPFOREST_MODEL
+
+        try:
+            from deepforest import main as deepforest_main
+        except ImportError as exc:
+            raise RuntimeError(
+                "DeepForest is not installed. Open Command Prompt and run: pip install deepforest"
+            ) from exc
+
+        model = deepforest_main.deepforest()
+        if hasattr(model, "load_model"):
+            # DeepForest 2.x: load the pretrained tree-crown model from Hugging Face.
+            model.load_model(model_name="weecology/deepforest-tree", revision="main")
+        elif hasattr(model, "use_release"):
+            # Compatibility with older DeepForest releases.
+            model.use_release()
+        else:
+            raise RuntimeError("This DeepForest installation has no supported pretrained-model loader.")
+
+        _DEEPFOREST_MODEL = model
+        return _DEEPFOREST_MODEL
+
+
+def _predict_with_deepforest(model, image_path: str):
+    """Run overlapping-window inference, adapting to DeepForest 1.x/2.x signatures."""
+    import inspect
+
+    predict_fn = model.predict_tile
+    try:
+        parameters = inspect.signature(predict_fn).parameters
+    except (TypeError, ValueError):
+        parameters = {}
+
+    kwargs = {
+        "patch_size": DEEPFOREST_PATCH_SIZE,
+        "patch_overlap": DEEPFOREST_PATCH_OVERLAP,
+        "iou_threshold": DEEPFOREST_IOU_THRESHOLD,
+    }
+    if "path" in parameters or not parameters:
+        kwargs["path"] = image_path
+    elif "raster_path" in parameters:
+        kwargs["raster_path"] = image_path
+    else:
+        kwargs["path"] = image_path
+
+    if "return_plot" in parameters:
+        kwargs["return_plot"] = False
+    if "mosaic" in parameters:
+        kwargs["mosaic"] = True
+    if "dataloader_strategy" in parameters:
+        kwargs["dataloader_strategy"] = "single"
+
+    with _DEEPFOREST_INFERENCE_LOCK:
+        return predict_fn(**kwargs)
+
+
+def _normalise_deepforest_predictions(predictions, image_width: int, image_height: int) -> list[dict]:
+    """Convert DeepForest DataFrame rows into consistent pixel-space boxes."""
+    if predictions is None:
+        return []
+    if not hasattr(predictions, "iterrows"):
+        raise RuntimeError(f"Unexpected DeepForest result type: {type(predictions).__name__}")
+
+    if predictions.empty:
+        return []
+
+    column_map = {str(column).lower(): column for column in predictions.columns}
+    required = ("xmin", "ymin", "xmax", "ymax")
+    if not all(name in column_map for name in required):
+        raise RuntimeError(
+            "DeepForest returned predictions without the expected xmin/ymin/xmax/ymax columns. "
+            f"Returned columns: {list(predictions.columns)}"
+        )
+
+    detections = []
+    for _, row in predictions.iterrows():
+        try:
+            x1 = float(row[column_map["xmin"]])
+            y1 = float(row[column_map["ymin"]])
+            x2 = float(row[column_map["xmax"]])
+            y2 = float(row[column_map["ymax"]])
+            if not all(math.isfinite(v) for v in (x1, y1, x2, y2)):
+                continue
+            x1, x2 = sorted((max(0.0, min(float(image_width), x1)), max(0.0, min(float(image_width), x2))))
+            y1, y2 = sorted((max(0.0, min(float(image_height), y1)), max(0.0, min(float(image_height), y2))))
+            if x2 <= x1 or y2 <= y1:
+                continue
+            score = None
+            if "score" in column_map:
+                try:
+                    score = float(row[column_map["score"]])
+                except (TypeError, ValueError):
+                    pass
+            label = str(row[column_map["label"]]) if "label" in column_map else "Tree"
+            detections.append({
+                "xmin": x1, "ymin": y1, "xmax": x2, "ymax": y2,
+                "center_x": (x1 + x2) / 2.0,
+                "center_y": (y1 + y2) / 2.0,
+                "score": score,
+                "label": label,
+            })
+        except (TypeError, ValueError, KeyError):
+            continue
+    return detections
+
+
+def _save_detections_csv(path: str, detections: list[dict]) -> None:
+    import csv
+    fields = ["xmin", "ymin", "xmax", "ymax", "center_x", "center_y", "score", "label"]
+    with open(path, "w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields)
+        writer.writeheader()
+        for item in detections:
+            writer.writerow({key: item.get(key, "") for key in fields})
+
+
+def _draw_detection_boxes(
+    base_img: Image.Image,
+    detections: list[dict],
+    farm_poly: list[tuple[float, float]],
+    banner_text: str,
+    box_color: tuple[int, int, int],
+) -> Image.Image:
+    """Draw every predicted crown box and the original farm boundary."""
+    out = base_img.copy().convert("RGB")
+    draw = ImageDraw.Draw(out)
+    for item in detections:
+        x1, y1 = item["xmin"], item["ymin"]
+        x2, y2 = item["xmax"], item["ymax"]
+        draw.rectangle((x1, y1, x2, y2), outline=box_color, width=2)
+        cx, cy = item["center_x"], item["center_y"]
+        draw.ellipse((cx - 2, cy - 2, cx + 2, cy + 2), fill=box_color)
+
+    if len(farm_poly) >= 3:
+        draw.line(farm_poly + [farm_poly[0]], fill=(0, 220, 255), width=3)
+
+    bar_w = min(out.width - 8, max(260, len(banner_text) * 8 + 24))
+    draw.rectangle((8, 8, 8 + bar_w, 36), fill=(24, 24, 27), outline=box_color, width=2)
+    draw.text((16, 16), banner_text, fill=(255, 255, 255))
+    return out
+
+
+def _cleanup_old_farm_sets(folder: str, max_farms: int = 20) -> int:
+    """Keep the newest farm diagnostic folders; do not delete files outside this folder."""
+    try:
+        folders = [
+            os.path.join(folder, name) for name in os.listdir(folder)
+            if os.path.isdir(os.path.join(folder, name))
+        ]
+    except OSError:
+        return 0
+    folders.sort(key=lambda path: os.path.getmtime(path), reverse=True)
+    for old_folder in folders[max_farms:]:
+        try:
+            import shutil
+            shutil.rmtree(old_folder)
+        except OSError:
+            pass
+    return min(len(folders), max_farms)
+
+
+def _save_farm_satellite_image_impl(farm_code: str, raw_polygon: list) -> None:
+    if not PIL_OK:
+        log_to_console("⚠️ Pillow is not installed — run: pip install pillow")
+        return
+
+    started_at = time.time()
+    safe_code = re.sub(r'[\\/:*?"<>|\s]+', "_", (farm_code or "").strip()).strip("_")
+    if not safe_code or safe_code == "--":
+        safe_code = f"farm_{int(time.time())}"
+
+    expanded_poly = expand_polygon_meters(raw_polygon, SAT_BUFFER_METERS)
+    original_poly = [(float(p[0]), float(p[1])) for p in raw_polygon if p and len(p) >= 2]
+    if len(original_poly) > 3 and original_poly[0] == original_poly[-1]:
+        original_poly.pop()
+    if len(expanded_poly) < 3 or len(original_poly) < 3:
+        log_to_console(f"⚠️ [{safe_code}] Invalid farm polygon (< 3 points) — skipped.")
+        return
+
+    os.makedirs(SAT_DIR, exist_ok=True)
+    farm_dir = os.path.join(SAT_DIR, safe_code)
+    os.makedirs(farm_dir, exist_ok=True)
+    sat_path = os.path.join(farm_dir, "01_satellite_input_clean.png")
+    boundary_path = os.path.join(farm_dir, "02_satellite_with_boundaries.png")
+    raw_path = os.path.join(farm_dir, "03_deepforest_all_detections.png")
+    inside_path = os.path.join(farm_dir, "04_trees_inside_farm.png")
+    all_csv_path = os.path.join(farm_dir, "deepforest_all_detections.csv")
+    inside_csv_path = os.path.join(farm_dir, "deepforest_inside_farm.csv")
+    run_log_path = os.path.join(farm_dir, "run_log.txt")
+    with open(run_log_path, "w", encoding="utf-8") as handle:
+        handle.write(f"Kobo Bridge DeepForest run: {safe_code}\nStarted: {datetime.now().isoformat(timespec='seconds')}\n\n")
+
+    def say(message: str) -> None:
+        _tree_log(run_log_path, message)
+
+    say(f"🚀 [{safe_code}] DeepForest worker started; polygon_points={len(original_poly)}")
+    say(f"🗺️ Expanding image download boundary by {SAT_BUFFER_METERS:g} metres; detections will be filtered against the ORIGINAL farm boundary.")
+
+    for zoom in range(SAT_ZOOM, 16, -1):
+        expanded_px = [_lat_lng_to_pixel(lat, lng, zoom) for lat, lng in expanded_poly]
+        xs, ys = [p[0] for p in expanded_px], [p[1] for p in expanded_px]
+        min_x, max_x = min(xs), max(xs)
+        min_y, max_y = min(ys), max(ys)
+        span = max(max_x - min_x, max_y - min_y, 128.0)
+        pad = span * SAT_PADDING_RATIO
+        crop_x0, crop_y0 = min_x - pad, min_y - pad
+        crop_x1, crop_y1 = max_x + pad, max_y + pad
+        tx0, tx1 = int(math.floor(crop_x0 / 256.0)), int(math.floor(crop_x1 / 256.0))
+        ty0, ty1 = int(math.floor(crop_y0 / 256.0)), int(math.floor(crop_y1 / 256.0))
+        tasks = [(tx, ty, zoom) for ty in range(ty0, ty1 + 1) for tx in range(tx0, tx1 + 1)]
+        if len(tasks) > 144:
+            say(f"ℹ️ Zoom {zoom} requires {len(tasks)} tiles; stepping down to zoom {zoom - 1}.")
+            continue
+
+        say(f"📡 Downloading {len(tasks)} Google Satellite tiles at Zoom {zoom}...")
+        with ThreadPoolExecutor(max_workers=12) as pool:
+            results = list(pool.map(_fetch_google_sat_tile, tasks))
+        failed = sum(1 for _, _, tile in results if tile is None)
+        if failed:
+            say(f"⚠️ {failed}/{len(tasks)} tiles failed at Zoom {zoom}; trying Zoom {zoom - 1}.")
+            continue
+
+        canvas = Image.new("RGBA", ((tx1 - tx0 + 1) * 256, (ty1 - ty0 + 1) * 256))
+        for tx, ty, tile_img in results:
+            canvas.paste(tile_img, ((tx - tx0) * 256, (ty - ty0) * 256))
+        left = int(round(crop_x0 - tx0 * 256))
+        top = int(round(crop_y0 - ty0 * 256))
+        right = int(round(crop_x1 - tx0 * 256))
+        bottom = int(round(crop_y1 - ty0 * 256))
+        cropped = canvas.crop((left, top, right, bottom))
+
+        expanded_rel = [(px - crop_x0, py - crop_y0) for px, py in expanded_px]
+        original_px = [_lat_lng_to_pixel(lat, lng, zoom) for lat, lng in original_poly]
+        original_rel = [(px - crop_x0, py - crop_y0) for px, py in original_px]
+        # Keep detector input completely clean: boundary strokes are saved separately
+        # so coloured outlines cannot bias DeepForest's tree-crown predictions.
+        satellite = cropped.convert("RGB")
+        satellite.save(sat_path, "PNG")
+        boundary_preview = satellite.copy()
+        boundary_draw = ImageDraw.Draw(boundary_preview)
+        boundary_draw.line(expanded_rel + [expanded_rel[0]], fill=(250, 204, 21), width=3)
+        boundary_draw.line(original_rel + [original_rel[0]], fill=(0, 220, 255), width=3)
+        boundary_preview.save(boundary_path, "PNG")
+        width, height = satellite.size
+        say(f"🛰️ Saved clean satellite input: {width}x{height}px, zoom={zoom}.")
+        say(f"🗺️ Saved boundary preview: yellow=+5m download boundary, cyan=actual farm boundary: {boundary_path}")
+        say(f"📁 Farm diagnostic folder: {farm_dir}")
+
+        try:
+            say("🌲 Loading pretrained DeepForest model (first run may download model weights)...")
+            model = _get_deepforest_model()
+            say(f"🌲 Running DeepForest: patch_size={DEEPFOREST_PATCH_SIZE}, overlap={DEEPFOREST_PATCH_OVERLAP:.2f}, NMS IoU={DEEPFOREST_IOU_THRESHOLD:.2f}.")
+            predictions = _predict_with_deepforest(model, sat_path)
+            detections = _normalise_deepforest_predictions(predictions, width, height)
+            say(f"🌲 DeepForest returned {len(detections)} raw tree-crown boxes.")
+
+            inside_detections = [
+                item for item in detections
+                if _point_in_poly_xy(item["center_x"], item["center_y"], original_rel)
+            ]
+            say(f"📐 Original-boundary filter retained {len(inside_detections)} / {len(detections)} detections.")
+
+            _save_detections_csv(all_csv_path, detections)
+            _save_detections_csv(inside_csv_path, inside_detections)
+
+            raw_image = _draw_detection_boxes(
+                satellite, detections, original_rel,
+                f"{safe_code} | DeepForest raw detections: {len(detections)}",
+                (239, 68, 68),
+            )
+            raw_image.save(raw_path, "PNG")
+            inside_image = _draw_detection_boxes(
+                satellite, inside_detections, original_rel,
+                f"{safe_code} | Inside actual farm: {len(inside_detections)} trees",
+                (34, 197, 94),
+            )
+            inside_image.save(inside_path, "PNG")
+
+            elapsed = time.time() - started_at
+            say(f"🖼️ Saved all-detections image: {raw_path}")
+            say(f"🖼️ Saved inside-farm image: {inside_path}")
+            say(f"📄 Saved detection CSV files: {all_csv_path} and {inside_csv_path}")
+            say(f"✅ DONE in {elapsed:.1f}s — DeepForest raw={len(detections)}, inside original farm={len(inside_detections)}.")
+            with open(run_log_path, "a", encoding="utf-8") as handle:
+                handle.write("\nSUMMARY\n")
+                handle.write(f"farm_code={safe_code}\nimage_size={width}x{height}\nzoom={zoom}\n")
+                handle.write(f"model=weecology/deepforest-tree\npatch_size={DEEPFOREST_PATCH_SIZE}\n")
+                handle.write(f"patch_overlap={DEEPFOREST_PATCH_OVERLAP}\niou_threshold={DEEPFOREST_IOU_THRESHOLD}\n")
+                handle.write(f"raw_detections={len(detections)}\ninside_original_farm={len(inside_detections)}\n")
+                handle.write(f"elapsed_seconds={elapsed:.1f}\n")
+            kept = _cleanup_old_farm_sets(SAT_DIR, SAT_MAX_FARMS)
+            say(f"🗂️ Diagnostic retention: {kept}/{SAT_MAX_FARMS} latest farm folders kept.")
+        except Exception as exc:
+            import traceback
+            say(f"❌ [{safe_code}] DEEPFOREST ERROR: {type(exc).__name__}: {exc}")
+            say(traceback.format_exc())
+            # Keep the satellite image and log even when model loading/inference fails.
+        return
+
+    say(f"❌ Could not download a complete satellite mosaic for {safe_code}; no detector was run.")
+
+
+def save_farm_satellite_image(farm_code: str, raw_polygon: list) -> None:
+    """Worker entry point with an outer guard so errors are always visible."""
+    try:
+        log_to_console(f"🚀 [Tree counter] Worker entered for {farm_code or 'unnamed farm'}; polygon_points={len(raw_polygon or [])}")
+        _save_farm_satellite_image_impl(farm_code, raw_polygon)
+        log_to_console(f"🏁 [Tree counter] Worker finished for {farm_code or 'unnamed farm'}.")
+    except Exception as exc:
+        import traceback
+        log_to_console(f"❌ [Tree counter] UNHANDLED ERROR for {farm_code or 'unnamed farm'}: {type(exc).__name__}: {exc}")
+        log_to_console(traceback.format_exc())
+
 
 # -------------------- Data Processing -------------------- #
 def extract_field_value(table: list, exact_label: str, keyword_fallback: str) -> str:
@@ -964,7 +1596,47 @@ def process_incoming_payload(data: dict) -> None:
     except Exception as ex:
         broken_rules = [f"حصل خطأ في فحص القواعد: {ex}"]
 
+    # Keep the non-tree problems hidden until the reviewer returns the manual tree count.
+    global _tree_review_active_code, _tree_review_last_queued_code
+    farm_code_for_review = str(extracted_values.get("farm_code", "")).strip()
+    tree_rows = _tree_block_from_table(table)
+    submitted_counts = _tree_counts_from_rows(tree_rows)
+    submitted_tree_total = sum(submitted_counts)
+    if farm_code_for_review and farm_code_for_review != "--":
+        review_session = {
+            "farm_code": farm_code_for_review,
+            "tree_rows": tree_rows,
+            "submitted_counts": submitted_counts,
+            "submitted_total": submitted_tree_total,
+            "base_problems": list(broken_rules),
+            "tree_checked": False,
+            "image_url": f"http://127.0.0.1:5000/tree-counter/image/{urllib.parse.quote(_safe_farm_folder(farm_code_for_review))}"
+        }
+        with _tree_review_lock:
+            _tree_review_active_code = farm_code_for_review
+            _tree_review_sessions[farm_code_for_review] = review_session
+            if farm_code_for_review != _tree_review_last_queued_code:
+                _tree_review_queue.append({"farm_code": farm_code_for_review})
+                _tree_review_last_queued_code = farm_code_for_review
     problems_line = format_problems(broken_rules)
+
+    global _last_sat_signature, _last_farm_code, _last_farm_polygon
+    poly = extracted.get("farm_polygon") or polygon_from_table(table)
+    
+    if poly and len(poly) >= 3:
+        farm_code_val = extracted_values.get("farm_code", "")
+        _last_farm_code = farm_code_val
+        _last_farm_polygon = poly
+        sig = (farm_code_val, tuple((round(float(p[0]), 6), round(float(p[1]), 6)) for p in poly))
+        
+        if sig != _last_sat_signature:
+            _last_sat_signature = sig
+            log_to_console(f"🚀 [{farm_code_val}] Starting satellite + DeepForest tree counter...")
+            threading.Thread(
+                target=save_farm_satellite_image,
+                args=(farm_code_val, poly),
+                daemon=True
+            ).start()
 
     def update_gui():
         doc_btn.config(text=f"📂 Docs ({len(latest_attachments)})")
@@ -975,7 +1647,9 @@ def process_incoming_payload(data: dict) -> None:
         add_to_history(extracted_values.get("farm_code", ""), extracted_values.get("governate", ""))
         refresh_history_list()
 
-        if problems_line:
+        if farm_code_for_review and farm_code_for_review != "--":
+            set_rule_text("جارٍ تأكيد عدد الأشجار من خلال الإضافة...", False)
+        elif problems_line:
             set_rule_text(problems_line, True)
         else:
             set_rule_text("No rules broken.", False)
@@ -1153,22 +1827,33 @@ def _parse_validation_status(vs) -> tuple[str, str]:
     if not label and vs.get("uid"):
         uid = str(vs.get("uid")).strip()
         label = _VAL_UID_MAP.get(uid, uid)
-        by_whom = str(vs.get("by_whom") or "").strip()
-        return label, by_whom
+    by_whom = str(vs.get("by_whom") or "").strip()
+    return label, by_whom
 
+def _get_work_log_ws():
+    global _work_log_ws
+    if _work_log_ws is None:
+        sh = get_gspread_client().open_by_key(SPREADSHEET_KEY)
+        _work_log_ws = sh.worksheet(SHEET_WORK_LOG_TAB)
+        if _work_log_ws.col_count < 8:
+            _work_log_ws.add_cols(8 - _work_log_ws.col_count)
+    return _work_log_ws
 
 def _lookup_single_farm_validation(code: str) -> tuple[str, str, str]:
-    """Checks Kobo API v2 for a single farm code right when Docs is clicked."""
+    """Checks Kobo API v2 for the LATEST submission of a single farm code when Docs is clicked."""
     try:
         server = SERVER_URL.rstrip("/")
         uid = find_asset_uid(server)
         q = quote(json.dumps({FARM_CODE_KEY: code}))
         f = quote(json.dumps(["_id", "_validation_status", FARM_CODE_KEY]))
-        url = f"{server}/api/v2/assets/{uid}/data/?format=json&query={q}&fields={f}&limit=5"
+        s = quote(json.dumps({"_id": -1}))
+        url = f"{server}/api/v2/assets/{uid}/data/?format=json&query={q}&fields={f}&sort={s}&limit=20"
         r = _session().get(url, headers=_auth_headers(), timeout=(5, 15))
         if r.ok:
-            for sub in r.json().get("results", []):
-                label, by = _parse_validation_status(sub.get("_validation_status"))
+            results = r.json().get("results", [])
+            if results:
+                latest_sub = max(results, key=lambda x: x.get("_id") or 0)
+                label, by = _parse_validation_status(latest_sub.get("_validation_status"))
                 if label:
                     return "Yes", label, by
     except Exception:
@@ -1176,73 +1861,62 @@ def _lookup_single_farm_validation(code: str) -> tuple[str, str, str]:
     return "No", "", ""
 
 
-def _get_work_log_ws():
-    global _work_log_ws
-    if _work_log_ws is None:
-        sh = get_gspread_client().open_by_key(SPREADSHEET_KEY)
-        _work_log_ws = sh.worksheet(SHEET_WORK_LOG_TAB)    # must already exist, never creates a new tab
-        if _work_log_ws.col_count < 8:
-            _work_log_ws.add_cols(8 - _work_log_ws.col_count)
-            return _work_log_ws
-
-
 def _append_log_rows(rows):
     ws = _get_work_log_ws()
-    existing_codes = {_farm_key(c) for c in ws.col_values(3)[1:] if _farm_key(c)}
-    unique_rows = []
+    rows_to_add = []
     for r in rows:
         k = _farm_key(r[2])
-        if k and k in existing_codes:
+        if not k:
             continue
-        if k:
-            existing_codes.add(k)
-            padded = list(r) + ["No", "", ""]
-            unique_rows.append(padded[:8])
+        # Only skip if the latest Kobo submission is already validated
+        if len(r) > 5 and str(r[5]).strip().lower() == "yes":
+            continue
+        padded = list(r) + ["No", "", ""]
+        rows_to_add.append(padded[:8])
 
-            if not unique_rows:
-                return 0
+    if not rows_to_add:
+        return 0
 
-            first = len(ws.col_values(1)) + 1                      # next free row, looking at column A only
-            last = first + len(unique_rows) - 1
-            if ws.row_count < last:
-                ws.add_rows(last - ws.row_count + 50)
-                ws.update(range_name=f"A{first}:H{last}", values=unique_rows, value_input_option="USER_ENTERED")
-                return len(unique_rows)
+    first = len(ws.col_values(1)) + 1
+    last = first + len(rows_to_add) - 1
+    if ws.row_count < last:
+        ws.add_rows(last - ws.row_count + 50)
+    ws.update(range_name=f"A{first}:H{last}", values=rows_to_add, value_input_option="USER_ENTERED")
+    return len(rows_to_add)
 
 
 def log_docs_click(code, gov, kobo_user):
     global _work_log_ws
     now = datetime.now(CAIRO)
     val_flag, val_status, val_by = _lookup_single_farm_validation(code)
-    new_row = [now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), code, gov, kobo_user, val_flag, val_status, val_by]
+    status_label = "✓ Already validated"
 
-    with _work_log_lock:
-        rows = list(pgs_store.get("work_log_pending", []) or [])
-        if not any(_farm_key(r[2]) == _farm_key(code) for r in rows if len(r) > 2):
+    if val_flag == "Yes":
+        LOG(f"[WORK LOG] ℹ️ {code} is already validated on Kobo ({val_status} by {val_by}) - skipped.")
+    else:
+        new_row = [now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"), code, gov, kobo_user, "No", "", ""]
+        with _work_log_lock:
+            rows = list(pgs_store.get("work_log_pending", []) or [])
             rows.append(new_row)
             try:
-                added = _append_log_rows(rows)
+                _append_log_rows(rows)
                 pgs_store.delete("work_log_pending")
-                if added == 0:
-                    LOG(f"[WORK LOG] ℹ️ {code} is already in _sys_work_log (duplicate skipped).")
-                    status_label = "✓ Already logged"
-                else:
-                    LOG(f"[WORK LOG] ✓ {code} / {kobo_user} saved at {new_row[1]} (Validated={val_flag})")
-                    status_label = "✓ Logged"
+                LOG(f"[WORK LOG] ✓ {code} / {kobo_user} saved at {new_row[1]} (Validated=No)")
+                status_label = "✓ Logged"
             except Exception as e:
                 _work_log_ws = None
                 pgs_store.set("work_log_pending", rows)
                 LOG(f"[WORK LOG] ✗ Could not send ({type(e).__name__}: {e!r}). Saved (encrypted), will retry on the next Docs click.")
                 status_label = "⚠ Not sent"
 
-def flash():
-    doc_btn.config(text=status_label)
-    root.after(1500, lambda: doc_btn.config(text=f"📂 Docs ({len(latest_attachments)})"))
+    def flash():
+        doc_btn.config(text=status_label)
+        root.after(1500, lambda: doc_btn.config(text=f"📂 Docs ({len(latest_attachments)})"))
+
     root.after(0, flash)
 
-    # -------------------- Work Log check (runs on Divide Work) -------------------- #
-    WORK_LOG_MONTHS_TO_KEEP = 4   # current month + the 3 months before it. Older rows are deleted automatically.
-
+# -------------------- Work Log check (runs on Divide Work) -------------------- #
+WORK_LOG_MONTHS_TO_KEEP = 4
 
 def _farm_key(code):
     """Makes farm codes comparable: no spaces, Arabic digits -> normal digits, upper case."""
@@ -1259,14 +1933,14 @@ def _sheet_date(v):
             return datetime.strptime(s, fmt).date()
         except ValueError:
             pass
-        return None
+    return None
 
 
 def sync_work_log(sh, subs):
-    """1) Deduplicates Farm Codes in _sys_work_log (keeps first entry).
-    2) Checks Kobo _validation_status: writes Yes/No in F, status in G, validator in H.
-    3) Permanently locks rows once Validated == 'Yes'.
-    4) Deletes rows older than the 4-month window."""
+    """1) Checks ONLY the latest Kobo submission per Farm Code (ignores older duplicate uploads).
+       2) Never touches rows that already have 'Validated By' filled in Column H.
+       3) Once the latest submission is validated, credits ONLY the first pending row and deletes newer duplicates.
+       4) Deletes rows older than the 4-month window."""
     LOG("[WORK LOG] Checking logged farms against Kobo validations...")
     try:
         ws = sh.worksheet(SHEET_WORK_LOG_TAB)
@@ -1274,82 +1948,80 @@ def sync_work_log(sh, subs):
         LOG("[WORK LOG] _sys_work_log tab does not exist yet (no Docs clicks logged). Skipping.")
         return
 
-    # Kobo side: farm code -> (status, validated by) from earliest validated submission
-    kobo_valid, kobo_all = {}, set()
-    for s in sorted(subs, key=lambda x: x.get("_id") or 0):
+    # Kobo side: check ONLY the latest submission (_id descending) for each farm code
+    kobo_latest_valid, kobo_all = {}, set()
+    seen_codes = set()
+    for s in sorted(subs, key=lambda x: x.get("_id") or 0, reverse=True):
         code = _farm_key(s.get(FARM_CODE_KEY) or find_value(s, FARM_CODE_HINTS))
         if not code:
             continue
         kobo_all.add(code)
+        if code in seen_codes:
+            continue
+        seen_codes.add(code)
         label, by = _parse_validation_status(s.get("_validation_status"))
-        if label and code not in kobo_valid:
-            kobo_valid[code] = (label, by)
+        if label:
+            kobo_latest_valid[code] = (label, by)
 
-            values = ws.get_all_values(value_render_option="UNFORMATTED_VALUE")
-            if len(values) < 2:
-                LOG("[WORK LOG] Log is empty. Nothing to check.")
-                return
+    values = ws.get_all_values(value_render_option="UNFORMATTED_VALUE")
+    if len(values) < 2:
+        LOG("[WORK LOG] Log is empty. Nothing to check.")
+        return
 
-            # first day of the oldest month we keep
-            t = datetime.now(CAIRO)
-            y, m = t.year, t.month - (WORK_LOG_MONTHS_TO_KEEP - 1)
-            while m < 1:
-                m, y = m + 12, y - 1
-                cutoff = datetime(y, m, 1).date()
+    # First day of the oldest month we keep (current month + 3 previous months)
+    t = datetime.now(CAIRO)
+    y, m = t.year, t.month - (WORK_LOG_MONTHS_TO_KEEP - 1)
+    while m < 1:
+        m, y = m + 12, y - 1
+    cutoff = datetime(y, m, 1).date()
 
-                # If duplicate rows already exist, prefer keeping the one that is already locked ("Yes"), else the first row
-                best_row_for_code = {}
-                for i, row in enumerate(values[1:], start=2):
-                    row_padded = list(row) + [""] * (8 - len(row))
-                    code = _farm_key(row_padded[2])
-                    if not code:
-                        continue
-                    is_locked = str(row_padded[5]).strip().lower() == "yes"
-                    if code not in best_row_for_code or (is_locked and not best_row_for_code[code][1]):
-                        best_row_for_code[code] = (i, is_locked)
+    cell_updates = []
+    rows_to_delete, not_in_kobo = [], []
+    newly_credited_codes = set()
+    n_valid = n_new = n_dups = 0
 
-                        out = [["Validated", "Validation Status", "Validated By"]]
-                        rows_to_delete, not_in_kobo = [], []
-                        n_valid = n_new = n_dups = 0
+    for i, row in enumerate(values[1:], start=2):          # i = real row number in the sheet
+        row = list(row) + [""] * (8 - len(row))
+        d = _sheet_date(row[0])
+        if d and d < cutoff:
+            rows_to_delete.append(i)
+            continue
 
-                        for i, row in enumerate(values[1:], start=2):          # i = real row number in the sheet
-                            row = list(row) + [""] * (8 - len(row))
-                            d = _sheet_date(row[0])
-                            if d and d < cutoff:
-                                rows_to_delete.append(i)
-                                out.append(["", "", ""])
-                                continue
+        # Once Column H (Validated By) is filled, DO NOT touch this row at all
+        if str(row[7]).strip():
+            n_valid += 1
+            continue
 
-                            code = _farm_key(row[2])
-                            if code and best_row_for_code.get(code, (i, False))[0] != i:
-                                rows_to_delete.append(i)                         # duplicate Farm Code -> remove extra row
-                                out.append(["", "", ""])
-                                n_dups += 1
-                                continue
+        code = _farm_key(row[2])
+        if code and code in kobo_latest_valid:
+            # Latest Kobo submission is validated: credit ONLY the first pending row, delete newer duplicates
+            if code in newly_credited_codes:
+                rows_to_delete.append(i)
+                n_dups += 1
+                continue
 
-                            was_yes = str(row[5]).strip().lower() == "yes"
-                            if was_yes:
-                                out.append([row[5], row[6], row[7]])             # LOCKED: first validator is stored forever
-                                n_valid += 1
-                            elif code in kobo_valid:
-                                label, by = kobo_valid[code]
-                                out.append(["Yes", label, by])                   # first time Kobo shows a validation -> lock it
-                                n_valid += 1
-                                n_new += 1
-                            else:
-                                out.append(["No", "", ""])
-                                if code and code not in kobo_all:
-                                    not_in_kobo.append(str(row[2]))
+            newly_credited_codes.add(code)
+            label, by = kobo_latest_valid[code]
+            cell_updates.append({"range": f"F{i}:H{i}", "values": [["Yes", label, by]]})
+            n_valid += 1
+            n_new += 1
+        else:
+            # Not validated yet: keep all pending rows; only write "No" if F isn't already "No"
+            if str(row[5]).strip().lower() != "no":
+                cell_updates.append({"range": f"F{i}:H{i}", "values": [["No", "", ""]]})
+            if code and code not in kobo_all:
+                not_in_kobo.append(str(row[2]))
 
-                                    if ws.col_count < 8:
-                                        ws.add_cols(8 - ws.col_count)
+    if cell_updates:
+        if ws.col_count < 8:
+            ws.add_cols(8 - ws.col_count)
+        ws.batch_update(cell_updates, value_input_option="USER_ENTERED")
 
-                                        ws.update(range_name=f"F1:H{len(values)}", values=out)
-            if rows_to_delete:                                       # delete old/duplicate rows, bottom block first
-                rows_to_delete = sorted(set(rows_to_delete))
-                blocks, start, prev = [], rows_to_delete[0], rows_to_delete[0]
-            for r in rows_to_delete[1:]:
-                if r == prev + 1:
+    if rows_to_delete:                                       # Delete expired/duplicate rows, bottom block first
+        rows_to_delete = sorted(set(rows_to_delete))
+        blocks, start, prev = [], rows_to_delete[0], rows_to_delete[0]
+        for r in rows_to_delete[1:]:
+            if r == prev + 1:
                 prev = r
             else:
                 blocks.append((start, prev))
@@ -1357,9 +2029,10 @@ def sync_work_log(sh, subs):
         blocks.append((start, prev))
         for a, b in reversed(blocks):
             ws.delete_rows(a, b)
+
     total = len(values) - 1 - len(rows_to_delete)
-    LOG(f"[WORK LOG] {total} unique farm(s): {n_valid} validated ({n_new} newly confirmed), "
-        f"{total - n_valid} still 'No', {n_dups} duplicate(s) removed.")
+    LOG(f"[WORK LOG] {total} row(s) kept: {n_valid} validated ({n_new} newly confirmed), "
+        f"{total - n_valid} still 'No', {n_dups} validated duplicate(s) removed.")
     if not_in_kobo:
         LOG(f"[WORK LOG] Not found in Kobo at all (check the farm code): {', '.join(sorted(set(not_in_kobo))[:10])}")
 
@@ -1498,6 +2171,9 @@ def run_divide_work_pipeline():
     dist_ws.update("A1:D5", summary_rows)
     LOG("[SUCCESS] Divide Work pipeline completed!")
 
+    # Sync _sys_work_log (check validations, delete validated duplicates, clean >4 months)
+    sync_work_log(sh, subs)
+
 
 def _divide_work_thread():
     try:
@@ -1535,7 +2211,14 @@ threading.Thread(
     daemon=True
 ).start()
 
+# -------------------- App Lifecycle -------------------- #
+def _startup_key_checks():
+    if not pgs_store.get("kobo_token", ""):
+        prompt_kobo_token()
+
+
+
 root.protocol("WM_DELETE_WINDOW", lambda: (save_window_geometry(), root.destroy()))
 root.after(200, resize_window)
-root.after(800, lambda: prompt_kobo_token() if not pgs_store.get("kobo_token", "") else None)
+root.after(800, _startup_key_checks)
 root.mainloop()

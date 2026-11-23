@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "KoBo Document & Farm Map Extension",
-  "version": "1.2.13",
-  "description": "Extracts farm boundary geometries, soil sample points, and opens document queues one by one.",
+  "version": "1.2.14",
+  "description": "Extracts KoBo farm data, opens documents, and provides manual tree-count review.",
   "permissions": [
     "storage",
     "tabs",
