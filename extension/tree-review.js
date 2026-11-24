@@ -1,296 +1,275 @@
 'use strict';
 
-/* ========== Setup ========== */
 const farmCode = new URLSearchParams(location.search).get('farm_code') || '';
-const $ = id => document.getElementById(id);
 const BASE = 'http://127.0.0.1:5000';
+const $ = id => document.getElementById(id);
+const mv = $('mapView');
+const SVGNS = 'http://www.w3.org/2000/svg';
+const TILE = 256;
+const MIN_Z = 14;
+const MAX_Z = 20;
+const tileUrl = (x, y, z) => `https://mt1.google.com/vt/lyrs=s&x=${x}&y=${y}&z=${z}`;
+const fmt = n => Number(n || 0).toLocaleString('en-US');
 
 let session = null;
+let polygon = [];
 let marks = [];
 let undoStack = [];
 let redoStack = [];
+let center = { lat: 28, lng: 29 };
+let z = 18;
 let ready = false;
 let markersVisible = true;
-
-let zoom = 1;
-let mapZoom = 18;
-let minX = 0;
-let minY = 0;
-let mapW = 0;
-let mapH = 0;
-let tileCanvas = null;
-let tileCtx = null;
-let polygon = [];
+let drag = null;
+let moved = false;
+let rafId = 0;
+let lastWheel = 0;
+const tileEls = new Map();
 
 $('farmCode').textContent = farmCode || 'Farm code unavailable';
 
-const fmt = n => Number(n || 0).toLocaleString('en-US');
+/* ---------- Map math (Web Mercator) ---------- */
+function worldPx(lat, lng, zl) {
+  const s = TILE * Math.pow(2, zl);
+  const sin = Math.max(-0.9999, Math.min(0.9999, Math.sin(lat * Math.PI / 180)));
+  return {
+    x: (lng + 180) / 360 * s,
+    y: (0.5 - Math.log((1 + sin) / (1 - sin)) / (4 * Math.PI)) * s
+  };
+}
 
-/* ========== Undo / redo ========== */
+function unproject(x, y, zl) {
+  const s = TILE * Math.pow(2, zl);
+  const n = Math.PI - 2 * Math.PI * y / s;
+  return { lat: 180 / Math.PI * Math.atan(Math.sinh(n)), lng: x / s * 360 - 180 };
+}
+
+function origin() {
+  const w = mv.clientWidth, h = mv.clientHeight;
+  const c = worldPx(center.lat, center.lng, z);
+  return { ox: c.x - w / 2, oy: c.y - h / 2, w, h };
+}
+
+function toScreen(lat, lng) {
+  const { ox, oy } = origin();
+  const p = worldPx(lat, lng, z);
+  return { x: p.x - ox, y: p.y - oy };
+}
+
+/* ---------- Undo / counts ---------- */
 function snap() {
   undoStack.push(marks.map(m => ({ ...m })));
   if (undoStack.length > 1500) undoStack.shift();
   redoStack = [];
 }
 
-/* ========== Markers ========== */
-function redraw() {
-  const svg = $('markers');
-  svg.replaceChildren();
-
-  marks.forEach((m, i) => {
-    const g = document.createElementNS(svg.namespaceURI, 'g');
-    g.dataset.index = i;
-
-    // Hollow ring and center: imagery remains fully visible inside and between markers.
-    const ring = document.createElementNS(svg.namespaceURI, 'circle');
-    ring.setAttribute('cx', m.x);
-    ring.setAttribute('cy', m.y);
-    ring.setAttribute('r', Math.max(10, 10 / zoom));
-    ring.setAttribute('class', 'marker-ring');
-
-    const dot = document.createElementNS(svg.namespaceURI, 'circle');
-    dot.setAttribute('cx', m.x);
-    dot.setAttribute('cy', m.y);
-    dot.setAttribute('r', Math.max(3.5, 4 / zoom));
-    dot.setAttribute('class', 'marker-dot');
-
-    g.append(ring, dot);
-    svg.append(g);
-  });
-
+function updateCounts() {
   $('liveCount').textContent = fmt(marks.length);
   $('undo').disabled = !undoStack.length;
   $('redo').disabled = !redoStack.length;
   $('manualCount').value = String(marks.length);
 }
 
-function add(x, y) {
+/* ---------- Rendering ---------- */
+function scheduleRender() {
+  if (rafId) return;
+  rafId = requestAnimationFrame(() => { rafId = 0; render(); });
+}
+
+function render() {
+  if (!ready) return;
+  const { ox, oy, w, h } = origin();
+  const n = Math.pow(2, z);
+  const x0 = Math.floor(ox / TILE), x1 = Math.floor((ox + w) / TILE);
+  const y0 = Math.max(0, Math.floor(oy / TILE)), y1 = Math.min(n - 1, Math.floor((oy + h) / TILE));
+  const need = new Set();
+
+  for (let ty = y0; ty <= y1; ty++) {
+    for (let tx = x0; tx <= x1; tx++) {
+      const wx = ((tx % n) + n) % n;
+      const key = z + '/' + wx + '/' + ty;
+      need.add(key);
+      let img = tileEls.get(key);
+      if (!img) {
+        img = new Image();
+        img.draggable = false;
+        img.alt = '';
+        img.src = tileUrl(wx, ty, z);
+        $('tiles').appendChild(img);
+        tileEls.set(key, img);
+      }
+      img.style.transform = `translate(${Math.round(tx * TILE - ox)}px, ${Math.round(ty * TILE - oy)}px)`;
+    }
+  }
+  for (const [k, img] of tileEls) {
+    if (!need.has(k)) { img.remove(); tileEls.delete(k); }
+  }
+
+  $('imageState').textContent = `Google Satellite · zoom ${z}`;
+  $('zoomValue').textContent = `Zoom ${z}`;
+  drawOverlay();
+}
+
+function drawOverlay() {
+  const svg = $('overlay');
+  svg.replaceChildren();
+
+  if (polygon.length >= 3) {
+    const pts = polygon
+      .map(p => { const q = toScreen(+p[0], +p[1]); return `${q.x.toFixed(1)},${q.y.toFixed(1)}`; })
+      .join(' ');
+    const pg = document.createElementNS(SVGNS, 'polygon');
+    pg.setAttribute('points', pts);
+    pg.setAttribute('class', 'farm-boundary');
+    svg.appendChild(pg);
+  }
+
+  if (markersVisible) {
+    marks.forEach(m => {
+      const q = toScreen(m.lat, m.lng);
+      const ring = document.createElementNS(SVGNS, 'circle');
+      ring.setAttribute('cx', q.x); ring.setAttribute('cy', q.y); ring.setAttribute('r', 11);
+      ring.setAttribute('class', 'marker-ring');
+      const dot = document.createElementNS(SVGNS, 'circle');
+      dot.setAttribute('cx', q.x); dot.setAttribute('cy', q.y); dot.setAttribute('r', 3.5);
+      dot.setAttribute('class', 'marker-dot');
+      svg.appendChild(ring);
+      svg.appendChild(dot);
+    });
+  }
+  updateCounts();
+}
+
+/* ---------- Zoom / fit / layout ---------- */
+function zoomAt(nz, lx, ly) {
+  nz = Math.max(MIN_Z, Math.min(MAX_Z, nz));
+  if (nz === z) return;
+  const { ox, oy, w, h } = origin();
+  const under = unproject(ox + lx, oy + ly, z);
+  const p = worldPx(under.lat, under.lng, nz);
+  center = unproject(p.x - lx + w / 2, p.y - ly + h / 2, nz);
+  z = nz;
+  $('zoom').value = String(z);
+  render();
+}
+
+function fitPolygon() {
+  if (polygon.length < 3) return;
+  const lats = polygon.map(p => +p[0]), lngs = polygon.map(p => +p[1]);
+  const minLat = Math.min(...lats), maxLat = Math.max(...lats);
+  const minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
+  const w = mv.clientWidth, h = mv.clientHeight, pad = 40;
+  let best = MIN_Z;
+  for (let zl = MAX_Z; zl >= MIN_Z; zl--) {
+    const a = worldPx(maxLat, minLng, zl), b = worldPx(minLat, maxLng, zl);
+    if (b.x - a.x <= w - 2 * pad && b.y - a.y <= h - 2 * pad) { best = zl; break; }
+  }
+  z = best;
+  const a = worldPx(maxLat, minLng, z), b = worldPx(minLat, maxLng, z);
+  center = unproject((a.x + b.x) / 2, (a.y + b.y) / 2, z);
+  $('zoom').value = String(z);
+  render();
+}
+
+function layoutMap() {
+  const top = $('topbar').offsetHeight;
+  const st = $('status').offsetHeight + $('imageState').offsetHeight;
+  mv.style.height = Math.max(220, innerHeight - top - st - 26) + 'px';
+  if (ready) render();
+}
+
+/* ---------- Mouse: drag to pan, click to add, right-click to remove ---------- */
+mv.addEventListener('mousedown', e => {
+  if (e.button !== 0) return;
+  drag = { x: e.clientX, y: e.clientY, lat: center.lat, lng: center.lng };
+  moved = false;
+  mv.classList.add('dragging');
+});
+
+window.addEventListener('mousemove', e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (!moved && Math.hypot(dx, dy) < 4) return;
+  moved = true;
+  const c = worldPx(drag.lat, drag.lng, z);
+  const p = unproject(c.x - dx, c.y - dy, z);
+  center = { lat: p.lat, lng: p.lng };
+  scheduleRender();
+});
+
+window.addEventListener('mouseup', () => {
+  drag = null;
+  mv.classList.remove('dragging');
+});
+
+mv.addEventListener('click', e => {
+  if (!ready || moved) return;
+  const r = mv.getBoundingClientRect();
+  const { ox, oy } = origin();
+  const ll = unproject(ox + e.clientX - r.left, oy + e.clientY - r.top, z);
   snap();
-  marks.push({ x, y });
-  redraw();
-}
-
-function removeNearest(p) {
-  let ix = -1;
-  let d = 1e9;
-
-  marks.forEach((m, i) => {
-    const z = Math.hypot(m.x - p.x, m.y - p.y);
-    if (z < d) {
-      d = z;
-      ix = i;
-    }
-  });
-
-  if (ix >= 0 && d < 25 / zoom) {
-    snap();
-    marks.splice(ix, 1);
-    redraw();
-    return true;
-  }
-  return false;
-}
-
-function coord(e) {
-  const r = $('mapStage').getBoundingClientRect();
-  return {
-    x: (e.clientX - r.left) * mapW / r.width,
-    y: (e.clientY - r.top) * mapH / r.height
-  };
-}
-
-/* ========== Map math ========== */
-function latLonToTile(lat, lon, z) {
-  const n = 2 ** z;
-  const latR = Math.max(-85.05112878, Math.min(85.05112878, lat)) * Math.PI / 180;
-  return {
-    x: (lon + 180) / 360 * n,
-    y: (1 - Math.asinh(Math.tan(latR)) / Math.PI) / 2 * n
-  };
-}
-
-function project(lat, lon) {
-  const t = latLonToTile(lat, lon, mapZoom);
-  return {
-    x: (t.x - minX) * 256,
-    y: (t.y - minY) * 256
-  };
-}
-
-function drawPolygon() {
-  const svg = $('markers');
-  const ns = svg.namespaceURI;
-  const path = document.createElementNS(ns, 'polygon');
-
-  const pts = polygon
-    .map(p => {
-      const q = project(Number(p[0]), Number(p[1]));
-      return `${q.x},${q.y}`;
-    })
-    .join(' ');
-
-  path.setAttribute('points', pts);
-  path.setAttribute('class', 'farm-boundary');
-  svg.append(path);
-}
-
-/* ========== Esri imagery ========== */
-async function loadEsri() {
-  const poly = session.farm_polygon || [];
-  if (poly.length < 3) {
-    throw Error('The submission did not include a usable farm polygon.');
-  }
-  polygon = poly;
-
-  const minLat = Math.min(...poly.map(p => +p[0]));
-  const maxLat = Math.max(...poly.map(p => +p[0]));
-  const minLon = Math.min(...poly.map(p => +p[1]));
-  const maxLon = Math.max(...poly.map(p => +p[1]));
-
-  // Select a zoom that covers the polygon in a manageable tile grid,
-  // then show the sharpest suitable Esri level.
-  for (mapZoom = 18; mapZoom >= 14; mapZoom--) {
-    const a = latLonToTile(maxLat, minLon, mapZoom);
-    const b = latLonToTile(minLat, maxLon, mapZoom);
-    const tilesX = Math.ceil(b.x) - Math.floor(a.x) + 1;
-    const tilesY = Math.ceil(b.y) - Math.floor(a.y) + 1;
-    if (tilesX <= 18 && tilesY <= 18) break;
-  }
-
-  const nw = latLonToTile(maxLat, minLon, mapZoom);
-  const se = latLonToTile(minLat, maxLon, mapZoom);
-  minX = Math.floor(nw.x) - 1;
-  minY = Math.floor(nw.y) - 1;
-  const maxX = Math.ceil(se.x) + 1;
-  const maxY = Math.ceil(se.y) + 1;
-  mapW = (maxX - minX + 1) * 256;
-  mapH = (maxY - minY + 1) * 256;
-
-  $('mapCanvas').width = mapW;
-  $('mapCanvas').height = mapH;
-  tileCanvas = $('mapCanvas');
-  tileCtx = tileCanvas.getContext('2d');
-  tileCtx.fillStyle = '#202830';
-  tileCtx.fillRect(0, 0, mapW, mapH);
-
-  $('markers').setAttribute('viewBox', `0 0 ${mapW} ${mapH}`);
-  $('markers').setAttribute('preserveAspectRatio', 'none');
-
-  const total = (maxX - minX + 1) * (maxY - minY + 1);
-  let done = 0;
-
-  const tasks = [];
-  for (let y = minY; y <= maxY; y++) {
-    for (let x = minX; x <= maxX; x++) {
-      tasks.push({ x, y });
-    }
-  }
-
-  // Fetch in small batches to avoid overwhelming ArcGIS and browser.
-  for (let i = 0; i < tasks.length; i += 6) {
-    await Promise.all(tasks.slice(i, i + 6).map(async t => {
-      const img = new Image();
-      const url = `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${mapZoom}/${t.y}/${t.x}`;
-
-      await new Promise((resolve, reject) => {
-        img.onload = () => {
-          tileCtx.drawImage(img, (t.x - minX) * 256, (t.y - minY) * 256, 256, 256);
-          resolve();
-        };
-        img.onerror = () => reject(Error('Esri tile failed to load'));
-        img.src = url;
-      });
-
-      done++;
-      $('imageState').textContent = `Loading Esri World Imagery ${done}/${total} tiles · level ${mapZoom}`;
-    }));
-  }
-
-  ready = true;
-  $('imagePlaceholder').hidden = true;
-  $('imageState').textContent = `Esri World Imagery ready · level ${mapZoom} · farm boundary shown`;
-
-  $('mapStage').style.width = (mapW * zoom) + 'px';
-  $('mapStage').style.height = (mapH * zoom) + 'px';
-  $('mapCanvas').style.width = (mapW * zoom) + 'px';
-  $('mapCanvas').style.height = (mapH * zoom) + 'px';
-  $('markers').style.width = (mapW * zoom) + 'px';
-  $('markers').style.height = (mapH * zoom) + 'px';
-  $('markers').style.display = markersVisible ? 'block' : 'none';
-
-  drawPolygon();
-  redraw();
-  fit();
-}
-
-/* ========== Zoom ========== */
-function fit() {
-  if (!ready) return;
-  const avail = Math.max(180, innerHeight - $('topbar').offsetHeight - 90);
-  zoom = Math.min(1.35, avail / mapH);
-  $('zoom').value = String(zoom);
-  applyZoom();
-}
-
-function applyZoom() {
-  if (!ready) return;
-  const w = mapW * zoom;
-  const h = mapH * zoom;
-
-  $('mapStage').style.width = w + 'px';
-  $('mapStage').style.height = h + 'px';
-  $('mapCanvas').style.width = w + 'px';
-  $('mapCanvas').style.height = h + 'px';
-  $('markers').style.width = w + 'px';
-  $('markers').style.height = h + 'px';
-  $('zoomValue').textContent = Math.round(zoom * 100) + '%';
-
-  redraw();
-}
-
-/* ========== Events ========== */
-$('markers').addEventListener('click', e => {
-  if (!ready) return;
-  const p = coord(e);
-  add(p.x, p.y);
+  marks.push({ lat: ll.lat, lng: ll.lng });
+  drawOverlay();
 });
 
-$('markers').addEventListener('contextmenu', e => {
+mv.addEventListener('contextmenu', e => {
   e.preventDefault();
-  if (ready) removeNearest(coord(e));
+  if (!ready) return;
+  const r = mv.getBoundingClientRect();
+  const lx = e.clientX - r.left, ly = e.clientY - r.top;
+  let best = -1, bestD = 1e9;
+  marks.forEach((m, i) => {
+    const s = toScreen(m.lat, m.lng);
+    const d = Math.hypot(s.x - lx, s.y - ly);
+    if (d < bestD) { bestD = d; best = i; }
+  });
+  if (best >= 0 && bestD <= 14) {
+    snap();
+    marks.splice(best, 1);
+    drawOverlay();
+  } else {
+    $('status').textContent = 'Right-click inside a marker ring to remove it.';
+  }
 });
 
+mv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const now = Date.now();
+  if (now - lastWheel < 200) return;
+  lastWheel = now;
+  const r = mv.getBoundingClientRect();
+  zoomAt(z + (e.deltaY < 0 ? 1 : -1), e.clientX - r.left, e.clientY - r.top);
+}, { passive: false });
+
+/* ---------- Buttons ---------- */
 $('toggleMarkers').onclick = () => {
   markersVisible = !markersVisible;
-  $('markers').style.display = markersVisible ? 'block' : 'none';
   $('toggleMarkers').textContent = markersVisible ? 'Hide Markers' : 'Show Markers';
+  drawOverlay();
 };
 
 $('undo').onclick = () => {
-  if (undoStack.length) {
-    redoStack.push(marks.map(m => ({ ...m })));
-    marks = undoStack.pop();
-    redraw();
-  }
+  if (!undoStack.length) return;
+  redoStack.push(marks.map(m => ({ ...m })));
+  marks = undoStack.pop();
+  drawOverlay();
 };
 
 $('redo').onclick = () => {
-  if (redoStack.length) {
-    undoStack.push(marks.map(m => ({ ...m })));
-    marks = redoStack.pop();
-    redraw();
-  }
+  if (!redoStack.length) return;
+  undoStack.push(marks.map(m => ({ ...m })));
+  marks = redoStack.pop();
+  drawOverlay();
 };
 
 $('zoom').oninput = () => {
-  zoom = Number($('zoom').value);
-  applyZoom();
+  const { w, h } = origin();
+  zoomAt(+$('zoom').value, w / 2, h / 2);
 };
 
-$('fit').onclick = fit;
+$('fit').onclick = fitPolygon;
 
-/* ========== Session ========== */
+/* ---------- Session ---------- */
 async function loadSession() {
   try {
     const r = await fetch(BASE + '/tree-counter/session?farm_code=' + encodeURIComponent(farmCode));
@@ -299,55 +278,52 @@ async function loadSession() {
 
     const countRows = session.submitted_counts || [];
     const empty = countRows.length === 0;
-
     $('submittedCount').textContent = fmt(session.submitted_total);
     $('submittedDetails').textContent = empty
       ? 'No tree count values were extracted'
       : `Checklist values: ${countRows.map(fmt).join(' + ')}`;
-
-    // Red warning when no tree count values were extracted
     $('submittedCount').classList.toggle('warn', empty);
     $('submittedDetails').classList.toggle('warn', empty);
 
+    polygon = (session.farm_polygon || []).filter(p => p && p.length >= 2);
+    if (polygon.length >= 3) {
+      const lat = polygon.reduce((s, p) => s + (+p[0]), 0) / polygon.length;
+      const lng = polygon.reduce((s, p) => s + (+p[1]), 0) / polygon.length;
+      center = { lat, lng };
+    } else {
+      $('status').textContent = 'No farm boundary received. Showing the map without the boundary.';
+    }
+
+    ready = true;
+    layoutMap();
+    if (polygon.length >= 3) fitPolygon(); else render();
+
     $('finish').disabled = false;
     $('manualCount').value = '0';
-
-    await loadEsri();
   } catch (e) {
     $('status').textContent = e.message;
-    $('imagePlaceholder').hidden = false;
-    $('imagePlaceholder').textContent =
-      'Esri imagery/polygon could not load. Check internet and the farm boundary; do not finish until imagery is visible.';
     $('finish').disabled = true;
   }
 }
 
-/* ========== Finish ========== */
+/* ---------- Finish ---------- */
 $('finish').onclick = async () => {
-  if (!ready || !farmCode) return;
-
+  if (!farmCode) { $('status').textContent = 'Farm code missing'; return; }
   $('finish').disabled = true;
   $('finish').textContent = 'Sending…';
 
-  const count = marks.length;
-  $('manualCount').value = String(count);
+  let value = parseInt($('manualCount').value, 10);
+  if (!Number.isFinite(value) || value < 0) value = marks.length;
 
   try {
     const r = await fetch(BASE + '/tree-counter/result', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        farm_code: farmCode,
-        manual_count: count,
-        image_loaded: true
-      })
+      body: JSON.stringify({ farm_code: farmCode, manual_count: value, image_loaded: ready })
     });
     const d = await r.json();
     if (!r.ok) throw Error(d.message || 'Send failed');
-
-    $('status').textContent = d.mismatch
-      ? 'Count submitted — mismatch found.'
-      : 'Count submitted — accepted.';
+    $('status').textContent = d.mismatch ? 'Count submitted — mismatch found.' : 'Count submitted — accepted.';
     $('finish').textContent = 'Finished';
   } catch (e) {
     $('status').textContent = e.message;
@@ -356,4 +332,11 @@ $('finish').onclick = async () => {
   }
 };
 
+/* ---------- Start ---------- */
+const zs = $('zoom');
+zs.min = MIN_Z;
+zs.max = MAX_Z;
+zs.step = 1;
+zs.value = String(z);
+window.addEventListener('resize', layoutMap);
 loadSession();
