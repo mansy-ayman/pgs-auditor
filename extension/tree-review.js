@@ -150,7 +150,7 @@ async function loadEsri() {
 
   // Select a zoom that covers the polygon in a manageable tile grid,
   // then show the sharpest suitable Esri level.
-  for (mapZoom = 19; mapZoom >= 14; mapZoom--) {
+  for (mapZoom = 18; mapZoom >= 14; mapZoom--) {
     const a = latLonToTile(maxLat, minLon, mapZoom);
     const b = latLonToTile(minLat, maxLon, mapZoom);
     const tilesX = Math.ceil(b.x) - Math.floor(a.x) + 1;

@@ -1650,6 +1650,7 @@ def process_incoming_payload(data: dict) -> None:
             "submitted_counts": submitted_counts,
             "submitted_total": submitted_tree_total,
             "base_problems": list(broken_rules),
+            "farm_polygon": extracted.get("farm_polygon") or [],
             "tree_checked": False,
             "farm_polygon": [[float(p[0]), float(p[1])] for p in (poly or []) if p and len(p) >= 2],
         }
