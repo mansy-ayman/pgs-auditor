@@ -1,0 +1,6 @@
+Kobo Bridge DeepForest run: EG_3928
+Started: 2026-11-24T04:12:39
+
+[2026-11-24 04:12:39] 🚀 [EG_3928] DeepForest worker started; polygon_points=4
+[2026-11-24 04:12:39] 🗺️ Expanding image download boundary by 5 metres; detections will be filtered against the ORIGINAL farm boundary.
+[2026-11-24 04:12:39] 📡 Downloading 120 Google Satellite tiles at Zoom 20...

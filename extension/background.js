@@ -268,27 +268,9 @@ chrome.downloads.onChanged.addListener((delta) => {
 
 // ---------------- poll the Python server ----------------
 let pollDelay = 3000, pollTimer = null, polling = false;
-function openTreeReviewJobs() {
-  fetch(`${BASE}/tree-counter/open-queue`)
-    .then((res) => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json(); })
-    .then((data) => {
-      const jobs = data.jobs || [];
-      for (const job of jobs) {
-        if (!job || !job.farm_code) continue;
-        const url = chrome.runtime.getURL('tree-review.html') + '?farm_code=' + encodeURIComponent(job.farm_code);
-        chrome.tabs.create({ url, active: true }, () => {
-          if (chrome.runtime.lastError) addLog(`❌ Could not open tree review: ${chrome.runtime.lastError.message}`);
-          else addLog(`🌳 Opened manual tree review for ${job.farm_code}`);
-        });
-      }
-    })
-    .catch((err) => addLog(`⚠️ Tree review queue unavailable: ${err.message}`));
-}
-
 function pollQueue() {
   if (polling) return;
   polling = true;
-  openTreeReviewJobs();
   fetch(`${BASE}/open-queue`)
     .then((res) => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json(); })
     .then((data) => {
@@ -379,3 +361,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   });
 })();
 // <<< PGS AUTO-RELOAD <<<
+
+
+
+
+
+

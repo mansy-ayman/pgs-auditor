@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "KoBo Document & Farm Map Extension",
-  "version": "1.2.14",
-  "description": "Extracts KoBo farm data, opens documents, and provides manual tree-count review.",
+  "version": "1.2.15",
+  "description": "Extracts farm boundary geometries, soil sample points, and opens document queues one by one.",
   "permissions": [
     "storage",
     "tabs",
@@ -46,7 +46,10 @@
         "popup.css",
         "popup.js",
         "viewer.html",
-        "viewer.js"
+        "viewer.js",
+        "tree-review.html",
+        "tree-review.css",
+        "tree-review.js"
       ],
       "matches": [
         "<all_urls>"
