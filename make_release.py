@@ -460,10 +460,7 @@ def drive_find(sess, folder_id, name):
         "supportsAllDrives": "true", "includeItemsFromAllDrives": "true"}, timeout=60)
     if r.status_code >= 400:
         raise RuntimeError(f"{r.status_code} {r.text[:300]}")
-    data = r.json()
-    if "id" not in data:
-        raise RuntimeError(f"Google reply had no id: {str(data)[:300]}")
-    return data["id"]
+    return r.json().get("files", [])
 
 
 def drive_upload(sess, folder_id, path):
