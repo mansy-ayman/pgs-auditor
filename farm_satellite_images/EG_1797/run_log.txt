@@ -1,0 +1,11 @@
+Kobo Bridge DeepForest run: EG_1797
+Started: 2026-11-24T15:13:26
+
+[2026-11-24 15:13:27] 🚀 [EG_1797] DeepForest worker started; polygon_points=5
+[2026-11-24 15:13:27] 🗺️ Expanding image download boundary by 5 metres; detections will be filtered against the ORIGINAL farm boundary.
+[2026-11-24 15:13:27] 📡 Downloading 90 Google Satellite tiles at Zoom 20...
+[2026-11-24 15:13:40] 🛰️ Saved clean satellite input: 2054x2232px, zoom=20.
+[2026-11-24 15:13:41] 🗺️ Saved boundary preview: yellow=+5m download boundary, cyan=actual farm boundary: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_1797\02_satellite_with_boundaries.png
+[2026-11-24 15:13:41] 📁 Farm diagnostic folder: C:\Users\mansy.ayman\Desktop\pgs tool\pgs-farm-audit-tools\pgs auditor\farm_satellite_images\EG_1797
+[2026-11-24 15:13:41] 🌲 Loading pretrained DeepForest model (first run may download model weights)...
+[2026-11-24 15:14:21] 🌲 Running DeepForest: patch_size=800, overlap=0.25, NMS IoU=0.15.

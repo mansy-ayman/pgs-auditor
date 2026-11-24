@@ -658,12 +658,12 @@ def tree_counter_result():
     if not code or manual_count < 0:
         return jsonify({"status": "error", "message": "Farm code/count is invalid"}), 400
 
+    # Take the lock ONCE. The old version nested it, which froze the app.
     with _tree_review_lock:
         session = _tree_review_sessions.get(code)
         if not session:
             return jsonify({"status": "error", "message": "Unknown farm review"}), 404
         submitted = int(session.get("submitted_total", 0))
-        # Over the checklist count by even one is a mismatch. Up to 10% below it is accepted.
         too_many = manual_count > submitted
         too_few = submitted > 0 and manual_count < submitted and ((submitted - manual_count) / submitted) > 0.10
         mismatch = too_many or too_few
@@ -671,33 +671,33 @@ def tree_counter_result():
             f"عدد الأشجار المعدودة {manual_count}، والعدد في الاستمارة {submitted}. برجاء التصحيح"
             if mismatch else ""
         )
-        with _tree_review_lock:
-            session["manual_count"] = manual_count
-            session["tree_checked"] = True
-            session["tree_problem"] = tree_problem
-            _tree_review_sessions[code] = session
-            active = (_tree_review_active_code == code)
-            if active:
-                def update_tree_status():
-                    problems = list(session.get("base_problems", []))
-                    if tree_problem:
-                        problems.insert(0, tree_problem)
-                    display = format_problems(problems)
-                    set_rule_text(display, bool(problems))
-                    log_to_console(
-                        f"🌳 Tree review completed for {code}: "
-                        f"manual={manual_count}, checklist={submitted}; "
-                        f"{'MISMATCH' if mismatch else 'OK'}"
-                    )
-                root.after(0, update_tree_status)   # Tk must be updated from the main thread
+        session["manual_count"] = manual_count
+        session["tree_checked"] = True
+        session["tree_problem"] = tree_problem
+        _tree_review_sessions[code] = session
+        active = (_tree_review_active_code == code)
+        base_problems = list(session.get("base_problems", []))
 
-            return jsonify({
-                "status": "success",
-                "mismatch": mismatch,
-                "tree_problem": tree_problem,
-                "manual_count": manual_count,
-                "checklist_count": submitted,
-            }), 200
+        if active:
+            def update_tree_status():
+                problems = list(base_problems)
+                if tree_problem:
+                    problems.insert(0, tree_problem)
+                set_rule_text(format_problems(problems), bool(problems))
+                log_to_console(
+                    f"🌳 Tree review completed for {code}: "
+                    f"manual={manual_count}, checklist={submitted}; "
+                    f"{'MISMATCH' if mismatch else 'OK'}"
+                )
+            root.after(0, update_tree_status)   # Tk must be updated from the main thread
+
+        return jsonify({
+                    "status": "success",
+                    "mismatch": mismatch,
+                    "tree_problem": tree_problem,
+                    "manual_count": manual_count,
+                    "checklist_count": submitted,
+                }), 200
 
 
 @app.after_request
