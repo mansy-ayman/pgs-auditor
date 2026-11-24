@@ -35,7 +35,9 @@ function showPdf(blob) {
   const frame = document.createElement('iframe');
   frame.id = 'current-doc';
   frame.className = 'pdf-frame';
-  frame.src = URL.createObjectURL(new Blob([blob], { type: 'application/pdf' }));
+  const pdfUrl = URL.createObjectURL(blob.type === 'application/pdf' ? blob : new Blob([blob], { type: 'application/pdf' }));
+  frame.src = pdfUrl;
+  window.addEventListener('pagehide', () => URL.revokeObjectURL(pdfUrl));
   container.appendChild(frame);
   document.body.classList.add('pdf-mode');
   showControls(false);       // Chrome's own PDF toolbar has zoom/rotate
