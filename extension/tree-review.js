@@ -8,7 +8,7 @@ const SVGNS = 'http://www.w3.org/2000/svg';
 const TILE = 256;
 const MIN_Z = 14;
 const MAX_Z = 20;
-const tileUrl = (x, y, z) => `https://mt1.google.com/vt/lyrs=s&x=${x}&y=${y}&z=${z}`;
+const tileUrl = (x, y, z) => `https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/${z}/${y}/${x}`;
 const fmt = n => Number(n || 0).toLocaleString('en-US');
 
 let session = null;
@@ -104,9 +104,6 @@ function render() {
   for (const [k, img] of tileEls) {
     if (!need.has(k)) { img.remove(); tileEls.delete(k); }
   }
-
-  $('imageState').textContent = `Google Satellite · zoom ${z}`;
-  $('zoomValue').textContent = `Zoom ${z}`;
   drawOverlay();
 }
 
@@ -126,16 +123,12 @@ function drawOverlay() {
 
   if (markersVisible) {
     marks.forEach(m => {
-      const q = toScreen(m.lat, m.lng);
-      const ring = document.createElementNS(SVGNS, 'circle');
-      ring.setAttribute('cx', q.x); ring.setAttribute('cy', q.y); ring.setAttribute('r', 11);
-      ring.setAttribute('class', 'marker-ring');
-      const dot = document.createElementNS(SVGNS, 'circle');
-      dot.setAttribute('cx', q.x); dot.setAttribute('cy', q.y); dot.setAttribute('r', 3.5);
-      dot.setAttribute('class', 'marker-dot');
-      svg.appendChild(ring);
-      svg.appendChild(dot);
-    });
+  const q = toScreen(m.lat, m.lng);
+  const ring = document.createElementNS(SVGNS, 'circle');
+  ring.setAttribute('cx', q.x); ring.setAttribute('cy', q.y); ring.setAttribute('r', 11);
+  ring.setAttribute('class', 'marker-ring');
+  svg.appendChild(ring);
+});
   }
   updateCounts();
 }
