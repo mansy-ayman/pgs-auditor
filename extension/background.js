@@ -266,12 +266,41 @@ chrome.downloads.onChanged.addListener((delta) => {
   });
 });
 
-// ---------------- poll the Python server ----------------
+// ---------------- poll Python document + manual tree-review queues ----------------
 let pollDelay = 3000, pollTimer = null, polling = false;
+const openedTreeFarms = new Set();
+
+async function pollTreeReviewQueue() {
+  try {
+    const res = await fetch(`${BASE}/tree-counter/open-queue`, { cache: 'no-store' });
+    if (!res.ok) throw new Error(`tree queue HTTP ${res.status}`);
+    const data = await res.json();
+    const jobs = Array.isArray(data.jobs) ? data.jobs : [];
+    for (const job of jobs) {
+      const code = String(job && job.farm_code || '').trim();
+      if (!code || openedTreeFarms.has(code)) continue;
+      openedTreeFarms.add(code);
+      const reviewUrl = chrome.runtime.getURL('tree-review.html') + '?farm_code=' + encodeURIComponent(code);
+      addLog(`🌳 Python queued manual tree review for ${code}; opening review tab`);
+      chrome.tabs.create({ url: reviewUrl, active: true }, (tab) => {
+        if (chrome.runtime.lastError || !tab) {
+          openedTreeFarms.delete(code);
+          addLog(`❌ Could not open tree-review tab for ${code}: ${chrome.runtime.lastError?.message || 'unknown error'}`);
+        } else {
+          addLog(`🌳 Tree-review tab opened for ${code} (tab ${tab.id})`);
+        }
+      });
+    }
+  } catch (err) {
+    // Keep this visible in popup logs; otherwise the extension silently misses the review job.
+    addLog(`⚠️ Tree queue polling failed: ${err.message}`);
+  }
+}
+
 function pollQueue() {
   if (polling) return;
   polling = true;
-  fetch(`${BASE}/open-queue`)
+  fetch(`${BASE}/open-queue`, { cache: 'no-store' })
     .then((res) => { if (!res.ok) throw new Error(`HTTP ${res.status}`); return res.json(); })
     .then((data) => {
       pollDelay = 3000;                                   // server is alive
@@ -281,8 +310,12 @@ function pollQueue() {
         openAllDocs(docs);
       }
     })
-    .catch(() => { pollDelay = Math.min(pollDelay * 2, 30000); })   // Python off: back off to 30 s
-    .finally(() => { polling = false; clearTimeout(pollTimer); pollTimer = setTimeout(pollQueue, pollDelay); });
+    .catch((err) => { pollDelay = Math.min(pollDelay * 2, 30000); addLog(`⚠️ Python document queue unavailable: ${err.message}`); })
+    .finally(async () => {
+      // Tree jobs are independent of document jobs and must always be checked.
+      await pollTreeReviewQueue();
+      polling = false; clearTimeout(pollTimer); pollTimer = setTimeout(pollQueue, pollDelay);
+    });
 }
 chrome.alarms.create('poll_python_queue', { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'poll_python_queue') pollQueue(); });

@@ -606,6 +606,17 @@ def receive_kobo_data():
 
         _last_table_rows = table
         process_incoming_payload(data)
+        farm_code = str((extracted or {}).get("farm_code") or _last_farm_code or "current farm")
+        try:
+            tree_rows = _tree_block_from_table(table)
+            tree_counts = _tree_counts_from_rows(tree_rows)
+            log_to_console(f"📋 SUBMISSION TREE TABLE — {farm_code} | {len(tree_rows)} extracted rows | counts={tree_counts} | total={sum(tree_counts)}")
+            for row in tree_rows:
+                log_to_console(f"   {row.get('label', '')} : {row.get('value', '')}")
+            if not tree_rows:
+                log_to_console("⚠️ Tree section was not detected in the received table. Use the Table button to inspect the full submission.")
+        except Exception as table_exc:
+            log_to_console(f"⚠️ Could not print extracted tree table: {table_exc}")
         return jsonify({"status": "success", "message": "Data received successfully"}), 200
 
     except Exception as e:
@@ -640,10 +651,7 @@ def tree_counter_session():
 
 @app.route('/tree-counter/image/<path:farm_code>', methods=['GET'])
 def tree_counter_image(farm_code):
-    path = os.path.join(SAT_DIR, _safe_farm_folder(farm_code), "01_satellite_input_clean.png")
-    if not os.path.isfile(path):
-        return jsonify({"error": "Satellite image is not ready yet"}), 404
-    return send_file(path, mimetype="image/png", conditional=True)
+    return jsonify({"error": "Image files are disabled. The extension loads Esri World Imagery tiles directly."}), 410
 
 
 @app.route('/tree-counter/result', methods=['POST'])
@@ -658,12 +666,12 @@ def tree_counter_result():
     if not code or manual_count < 0:
         return jsonify({"status": "error", "message": "Farm code/count is invalid"}), 400
 
-    # Take the lock ONCE. The old version nested it, which froze the app.
     with _tree_review_lock:
         session = _tree_review_sessions.get(code)
         if not session:
             return jsonify({"status": "error", "message": "Unknown farm review"}), 404
         submitted = int(session.get("submitted_total", 0))
+        # Over the checklist count by even one is a mismatch. Up to 10% below it is accepted.
         too_many = manual_count > submitted
         too_few = submitted > 0 and manual_count < submitted and ((submitted - manual_count) / submitted) > 0.10
         mismatch = too_many or too_few
@@ -671,33 +679,33 @@ def tree_counter_result():
             f"عدد الأشجار المعدودة {manual_count}، والعدد في الاستمارة {submitted}. برجاء التصحيح"
             if mismatch else ""
         )
-        session["manual_count"] = manual_count
-        session["tree_checked"] = True
-        session["tree_problem"] = tree_problem
-        _tree_review_sessions[code] = session
-        active = (_tree_review_active_code == code)
-        base_problems = list(session.get("base_problems", []))
+        with _tree_review_lock:
+            session["manual_count"] = manual_count
+            session["tree_checked"] = True
+            session["tree_problem"] = tree_problem
+            _tree_review_sessions[code] = session
+            active = (_tree_review_active_code == code)
+            if active:
+                def update_tree_status():
+                    problems = list(session.get("base_problems", []))
+                    if tree_problem:
+                        problems.insert(0, tree_problem)
+                    display = format_problems(problems)
+                    set_rule_text(display, bool(problems))
+                    log_to_console(
+                        f"🌳 Tree review completed for {code}: "
+                        f"manual={manual_count}, checklist={submitted}; "
+                        f"{'MISMATCH' if mismatch else 'OK'}"
+                    )
+                root.after(0, update_tree_status)   # Tk must be updated from the main thread
 
-        if active:
-            def update_tree_status():
-                problems = list(base_problems)
-                if tree_problem:
-                    problems.insert(0, tree_problem)
-                set_rule_text(format_problems(problems), bool(problems))
-                log_to_console(
-                    f"🌳 Tree review completed for {code}: "
-                    f"manual={manual_count}, checklist={submitted}; "
-                    f"{'MISMATCH' if mismatch else 'OK'}"
-                )
-            root.after(0, update_tree_status)   # Tk must be updated from the main thread
-
-        return jsonify({
-                    "status": "success",
-                    "mismatch": mismatch,
-                    "tree_problem": tree_problem,
-                    "manual_count": manual_count,
-                    "checklist_count": submitted,
-                }), 200
+            return jsonify({
+                "status": "success",
+                "mismatch": mismatch,
+                "tree_problem": tree_problem,
+                "manual_count": manual_count,
+                "checklist_count": submitted,
+            }), 200
 
 
 @app.after_request
@@ -719,11 +727,14 @@ FONT = ("Segoe UI", 9, "bold")
 root = tk.Tk()
 root.title("Kobo Bridge")
 root.geometry(load_window_geometry())
+root.resizable(True, True)
+root.minsize(330, 330)
 root.configure(bg=BG)
 root.attributes("-topmost", True)
 
 root.columnconfigure(0, weight=1)
 root.rowconfigure(4, weight=1)   # console takes the leftover space
+root.columnconfigure(0, weight=1)
 
 # ---------- Farm fields (labels on the left, text right-to-left) ----------
 FIELD_TARGETS = [
@@ -1064,7 +1075,9 @@ def toggle_console() -> None:
     resize_window()
 
 def copy_current_table() -> None:
-    """Copies the latest submission table to the clipboard and prints every row in the console."""
+    """Reveal console, copy current submission, and show the extracted tree rows/counts."""
+    if not console_visible:
+        toggle_console()
     rows = _last_table_rows
     if not rows:
         log_to_console("⚠️ No submission table yet - open a KoBo submission first.")
@@ -1090,38 +1103,52 @@ activebackground="#8b5cf6", activeforeground="white", relief="flat", bd=0,
 padx=8, cursor="hand2", command=copy_current_table)
 table_btn.grid(row=0, column=4, sticky="e", padx=(4, 0))
 
-def open_tree_results_folder() -> None:
-    """Open the local folder containing satellite and DeepForest diagnostics."""
-    folder = os.path.join(SCRIPT_DIR, "farm_satellite_images")
-    os.makedirs(folder, exist_ok=True)
-    try:
-        if hasattr(os, "startfile"):
-            os.startfile(folder)
-        else:
-            import subprocess
-            subprocess.Popen(["explorer", folder])
-    except Exception as exc:
-        messagebox.showerror("Tree results folder", f"Could not open the folder:\n{folder}\n\n{exc}")
+# Compact theme switch; preference is persisted alongside farm history/settings.
+def toggle_theme(force=None):
+    global BG, PANEL, GREEN, MUTED, BORDER
+    light = (force == "light") if force else (pgs_store.get("dashboard_theme", "dark") != "light")
+    pgs_store.set("dashboard_theme", "light" if light else "dark")
+    BG, PANEL, GREEN, MUTED, BORDER = (
+        ("#f3f6fa", "#ffffff", "#16734a", "#596579", "#d4dce7") if light
+        else ("#1e1e1e", "#2b2b2b", "#00ff90", "#aaaaaa", "#3a3a3a")
+    )
+    root.configure(bg=BG)
+    for widget in (fields_frame, rule_header, console_frame):
+        widget.configure(bg=BG)
+    for widget in fields_frame.winfo_children():
+        try:
+            if isinstance(widget, tk.Label): widget.configure(bg=BG, fg=MUTED)
+            elif isinstance(widget, tk.Entry): widget.configure(bg=PANEL, fg=GREEN, insertbackground=GREEN)
+        except tk.TclError: pass
+    for widget in rule_header.winfo_children():
+        if isinstance(widget, tk.Label): widget.configure(bg=BG, fg=MUTED)
+    rule_text.configure(bg=PANEL, fg=GREEN)
+    console_text.configure(bg="#ffffff" if light else "#111111", fg=GREEN, insertbackground=GREEN)
+    theme_btn.configure(text="☀ Light" if not light else "☾ Dark")
+    root.update_idletasks()
 
+theme_btn = tk.Button(rule_header, text="☾ Dark", font=("Segoe UI", 8, "bold"), bg="#34495e", fg="white",
+                      relief="flat", bd=0, padx=7, cursor="hand2", command=toggle_theme)
+theme_btn.grid(row=0, column=5, sticky="e", padx=(4, 0))
+if pgs_store.get("dashboard_theme", "dark") == "light":
+    root.after(250, lambda: toggle_theme("light"))
 
-def trigger_tree_count_now() -> None:
-    if not console_visible:
-        toggle_console()
-    if not _last_farm_polygon or len(_last_farm_polygon) < 3:
-        log_to_console("⚠️ No farm loaded yet — open a submission in KoBo first.")
-        return
-    log_to_console(f"🔄 Manual run started for {_last_farm_code or 'current farm'}...")
-    threading.Thread(
-        target=save_farm_satellite_image,
-        args=(_last_farm_code, _last_farm_polygon),
-        daemon=True
-    ).start()
+# Persist normal resize/stretch geometry using the same settings store as farm history.
+_geometry_save_job = None
+def _save_geometry_after_resize(event=None):
+    global _geometry_save_job
+    if event is not None and event.widget is not root: return
+    if _geometry_save_job:
+        try: root.after_cancel(_geometry_save_job)
+        except tk.TclError: pass
+    _geometry_save_job = root.after(600, save_window_geometry)
+root.bind("<Configure>", _save_geometry_after_resize, add="+")
 
 # -------------------- Google Satellite + DeepForest Tree Counter -------------------- #
 SAT_ZOOM = 20
 SAT_BUFFER_METERS = 5.0
 SAT_PADDING_RATIO = 0.08
-SAT_MAX_FARMS = 20
+SAT_MAX_FARMS = 5  # retain only the latest five farm diagnostic/result folders
 SAT_DIR = os.path.join(SCRIPT_DIR, "farm_satellite_images")
 
 # DeepForest's pretrained crown detector is run on overlapping windows.
@@ -1609,12 +1636,13 @@ def process_incoming_payload(data: dict) -> None:
     except Exception as ex:
         broken_rules = [f"حصل خطأ في فحص القواعد: {ex}"]
 
-    # Keep the non-tree problems hidden until the reviewer returns the manual tree count.
+    # Restore the review gate: keep the farm rules pending until the extension submits its manual tree count.
     global _tree_review_active_code, _tree_review_last_queued_code
     farm_code_for_review = str(extracted_values.get("farm_code", "")).strip()
     tree_rows = _tree_block_from_table(table)
     submitted_counts = _tree_counts_from_rows(tree_rows)
     submitted_tree_total = sum(submitted_counts)
+    poly = extracted.get("farm_polygon") or polygon_from_table(table)
     if farm_code_for_review and farm_code_for_review != "--":
         review_session = {
             "farm_code": farm_code_for_review,
@@ -1623,7 +1651,7 @@ def process_incoming_payload(data: dict) -> None:
             "submitted_total": submitted_tree_total,
             "base_problems": list(broken_rules),
             "tree_checked": False,
-            "image_url": f"http://127.0.0.1:5000/tree-counter/image/{urllib.parse.quote(_safe_farm_folder(farm_code_for_review))}"
+            "farm_polygon": [[float(p[0]), float(p[1])] for p in (poly or []) if p and len(p) >= 2],
         }
         with _tree_review_lock:
             _tree_review_active_code = farm_code_for_review
@@ -1632,24 +1660,11 @@ def process_incoming_payload(data: dict) -> None:
                 _tree_review_queue.append({"farm_code": farm_code_for_review})
                 _tree_review_last_queued_code = farm_code_for_review
     problems_line = format_problems(broken_rules)
-
-    global _last_sat_signature, _last_farm_code, _last_farm_polygon
-    poly = extracted.get("farm_polygon") or polygon_from_table(table)
-    
+    global _last_farm_code, _last_farm_polygon
     if poly and len(poly) >= 3:
-        farm_code_val = extracted_values.get("farm_code", "")
-        _last_farm_code = farm_code_val
+        _last_farm_code = extracted_values.get("farm_code", "")
         _last_farm_polygon = poly
-        sig = (farm_code_val, tuple((round(float(p[0]), 6), round(float(p[1]), 6)) for p in poly))
-        
-        if sig != _last_sat_signature:
-            _last_sat_signature = sig
-            log_to_console(f"🚀 [{farm_code_val}] Starting satellite + DeepForest tree counter...")
-            threading.Thread(
-                target=save_farm_satellite_image,
-                args=(farm_code_val, poly),
-                daemon=True
-            ).start()
+        log_to_console(f"🛰️ [{_last_farm_code}] Esri imagery will load directly in the extension tree-review tab; no local satellite image or DeepForest job is started.")
 
     def update_gui():
         doc_btn.config(text=f"📂 Docs ({len(latest_attachments)})")
@@ -1811,12 +1826,26 @@ def get_gspread_client():
     if _gc is None:
         info = load_credentials_info()
         if info is None:
-            raise RuntimeError("The Google key is missing from this build (pgs_key.py).")
+            raise RuntimeError("Google service-account JSON is missing/invalid in pgs_key.py.")
+        if info.get("type") != "service_account" or not info.get("client_email") or not info.get("private_key"):
+            raise RuntimeError("Google key JSON is incomplete: expected service_account type, client_email and private_key.")
         scopes = [
             "https://www.googleapis.com/auth/spreadsheets",
             "https://www.googleapis.com/auth/drive",
         ]
-        _gc = gspread.authorize(Credentials.from_service_account_info(info, scopes=scopes))
+        try:
+            creds = Credentials.from_service_account_info(info, scopes=scopes)
+            # Validate the key/signature immediately instead of failing later on a Sheet request.
+            from google.auth.transport.requests import Request as GoogleAuthRequest
+            creds.refresh(GoogleAuthRequest())
+            _gc = gspread.authorize(creds)
+            LOG(f"[WORK LOG AUTH] Google service-account token refreshed successfully for {info.get('client_email', 'service account')}.")
+        except Exception as e:
+            _gc = None
+            msg = str(e)
+            if "Invalid JWT Signature" in msg or "invalid_grant" in msg:
+                raise RuntimeError("Google rejected the service-account JWT signature. Replace GOOGLE_KEY_JSON in pgs_key.py with a newly created JSON key for the same service account; check Windows date/time sync; then share the Sheet with that service-account email as Editor. Do not paste the private key into chat.") from e
+            raise RuntimeError(f"Google service-account authentication failed: {type(e).__name__}: {msg}") from e
     return _gc
     
 # -------------------- Work Log (every Docs click -> Google Sheet) -------------------- #

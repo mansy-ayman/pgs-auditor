@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "KoBo Document & Farm Map Extension",
-  "version": "1.2.15",
+  "version": "1.2.17",
   "description": "Extracts farm boundary geometries, soil sample points, and opens document queues one by one.",
   "permissions": [
     "storage",
@@ -61,5 +61,8 @@
     "32": "icons/icon32.png",
     "48": "icons/icon48.png",
     "128": "icons/icon128.png"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'; img-src 'self' https://server.arcgisonline.com data:"
   }
 }
