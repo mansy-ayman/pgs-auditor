@@ -1,4 +1,240 @@
-:root{color-scheme:dark;--bg:#11151b;--panel:#1d252e;--line:#35414e;--green:#22c55e;--text:#eef2f7;--muted:#aab6c4}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:15px "Segoe UI",Arial,sans-serif}button{font:inherit;cursor:pointer;border:1px solid #475569;background:#2a3644;color:#eef2f7;border-radius:7px;padding:8px 12px}button.active{background:#14532d;border-color:var(--green)}button:disabled{opacity:.4;cursor:default}.topbar{position:sticky;top:0;z-index:5;background:#17202a;border-bottom:1px solid var(--line);padding:10px 14px;display:flex;align-items:center;gap:16px;flex-wrap:wrap}.farm-code{font-weight:700;color:#a8c7ff;direction:ltr}.count{display:flex;align-items:center;gap:9px;background:#132b20;border:1px solid #24633f;border-radius:9px;padding:5px 12px}.count strong{font-size:27px;color:#4ade80}.tools{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.tools label{display:flex;align-items:center;gap:6px;color:var(--muted)}.tools input{width:115px;accent-color:var(--green)}.tools b{min-width:38px}main{padding:8px;overflow:visible}#status{color:var(--muted);margin:0 0 10px}#imagePlaceholder{color:#fbbf24;padding:15px}#mapStage{position:relative;display:inline-block;line-height:0;max-width:none}#mapCanvas{display:block;max-width:none}#markers{position:absolute;inset:0;width:100%;height:100%;overflow:visible;touch-action:pan-x pan-y;cursor:crosshair}.marker{fill:var(--green);fill-opacity:.9;stroke:#eafff0;stroke-width:2;cursor:pointer}
+/* ========== Base ========== */
+:root {
+  color-scheme: dark;
+  --bg: #11151b;
+  --panel: #1d252e;
+  --line: #35414e;
+  --green: #22c55e;
+  --text: #eef2f7;
+  --muted: #aab6c4;
+}
 
-#topbar{min-height:58px}.submitted{display:flex;align-items:center;gap:7px;padding:5px 10px;border:1px solid var(--line);border-radius:8px;color:var(--muted)}.submitted b{font-size:18px;color:#fbbf24}.submitted small{font-size:11px;max-width:190px}.hint{font-size:12px;color:var(--muted);white-space:nowrap}.manual{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--muted)}.manual input{width:72px;padding:6px;border-radius:6px;border:1px solid var(--line);background:var(--panel);color:var(--text)}#imageState{display:block;color:var(--muted);margin:0 0 5px}#imageStage{margin:0 auto}.marker-ring{fill:none;stroke:#ffe600;stroke-width:3;stroke-opacity:.95}.marker-dot{fill:#00f078;fill-opacity:.85;stroke:#fff;stroke-width:1.5}.farm-boundary{fill:rgba(255,255,0,0.04);stroke:#ff3b30;stroke-width:3;stroke-dasharray:8 5;pointer-events:none}.marker-halo,.marker-ring,.marker-dot{pointer-events:none}
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px "Segoe UI", Arial, sans-serif;
+}
+
+button {
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  border: 1px solid #475569;
+  background: #2a3644;
+  color: #eef2f7;
+  border-radius: 7px;
+  padding: 4px 8px;
+}
+
+button.active {
+  background: #14532d;
+  border-color: var(--green);
+}
+
+button:disabled {
+  opacity: .4;
+  cursor: default;
+}
+
+.warn {
+  color: #ef4444 !important;
+}
+
+/* ========== Top bar ========== */
+.topbar {
+  position: sticky;
+  top: 0;
+  z-index: 5;
+  background: #17202a;
+  border-bottom: 1px solid var(--line);
+  padding: 4px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+}
+
+.topbar > * {
+  flex: 0 0 auto;
+}
+
+.farm-code {
+  font-weight: 700;
+  color: #a8c7ff;
+  direction: ltr;
+}
+
+.count {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: #132b20;
+  border: 1px solid #24633f;
+  border-radius: 9px;
+  padding: 2px 8px;
+}
+
+.count strong {
+  font-size: 18px;
+  color: #4ade80;
+}
+
+.submitted {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 5px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.submitted b {
+  font-size: 18px;
+  color: #fbbf24;
+}
+
+.submitted small {
+  font-size: 12px;
+  color: var(--muted);
+  max-width: 190px;
+}
+
+.hint {
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* ========== Tools ========== */
+.tools {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: nowrap;
+}
+
+.tools label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+}
+
+.tools input {
+  width: 70px;
+  accent-color: var(--green);
+}
+
+.tools b {
+  min-width: 38px;
+}
+
+.manual {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.manual input {
+  width: 72px;
+  padding: 6px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+}
+
+/* ========== Main / map ========== */
+main {
+  padding: 8px;
+  overflow: visible;
+}
+
+#status {
+  color: var(--muted);
+  margin: 0 0 10px;
+}
+
+#imagePlaceholder {
+  color: #fbbf24;
+  padding: 15px;
+}
+
+#imageState {
+  display: block;
+  color: var(--muted);
+  margin: 0 0 5px;
+}
+
+#imageStage {
+  margin: 0 auto;
+}
+
+#mapStage {
+  position: relative;
+  display: inline-block;
+  line-height: 0;
+  max-width: none;
+}
+
+#mapCanvas {
+  display: block;
+  max-width: none;
+}
+
+#markers {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  touch-action: pan-x pan-y;
+  cursor: crosshair;
+}
+
+/* ========== Markers / boundary ========== */
+.marker {
+  fill: var(--green);
+  fill-opacity: .9;
+  stroke: #eafff0;
+  stroke-width: 2;
+  cursor: pointer;
+}
+
+.marker-ring {
+  fill: none;
+  stroke: #ffe600;
+  stroke-width: 3;
+  stroke-opacity: .95;
+}
+
+.marker-dot {
+  fill: #00f078;
+  fill-opacity: .85;
+  stroke: #fff;
+  stroke-width: 1.5;
+}
+
+.farm-boundary {
+  fill: rgba(255, 255, 0, 0.04);
+  stroke: #ff3b30;
+  stroke-width: 3;
+  stroke-dasharray: 8 5;
+  pointer-events: none;
+}
+
+.marker-halo,
+.marker-ring,
+.marker-dot {
+  pointer-events: none;
+}

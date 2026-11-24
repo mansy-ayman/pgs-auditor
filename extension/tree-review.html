@@ -9,15 +9,16 @@
 <body>
   <header class="topbar" id="topbar">
     <div class="farm-code" id="farmCode">Loading farm...</div>
-    <div class="count"><span>Tree Count</span><strong id="liveCount">0</strong></div><div class="submitted">Checklist <b id="submittedCount">--</b><small id="submittedDetails">Loading extracted values…</small></div>
+    <div class="count"><span>Tree Count</span><strong id="liveCount">0</strong></div>
+    <div class="submitted">Checklist <b id="submittedCount">--</b> <small id="submittedDetails">Loading…</small></div>
     <div class="tools">
-      <span class="hint">Click each tree to mark · Right-click marker to remove</span>
       <button id="toggleMarkers">Hide Markers</button>
       <button id="undo" disabled>Undo</button>
       <button id="redo" disabled>Redo</button>
       <button id="fit">Fit</button>
       <label>Zoom <input id="zoom" type="range" min="0.5" max="4" step="0.1" value="1"><b id="zoomValue">100%</b></label>
-      <label class="manual">Counted by clicks <input id="manualCount" type="number" min="0" step="1" value="0" readonly></label><button id="finish">Finish</button>
+      <label class="manual">Manual <input id="manualCount" type="number" min="0" step="1" value="0"></label>
+      <button id="finish">Finish</button>
     </div>
   </header>
   <main>
