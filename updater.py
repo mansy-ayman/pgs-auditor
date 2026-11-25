@@ -14,6 +14,7 @@ import tempfile
 import subprocess
 import threading
 import time
+import queue
 
 import pgs_store
 
@@ -29,6 +30,7 @@ UPDATE_LOG_NAME = "pgs_update_helper.log"   # tiny temp log written by finish_up
 CREATE_NO_WINDOW = 0x08000000        # Windows flag: start a helper without a black console window
 
 _declined = set()                    # versions the user said "not now" to (this session only)
+_ui_queue = queue.Queue()                # Tk calls must run on the main thread: the background thread puts work here
 
 
 # ---------------- small helpers ----------------
@@ -301,7 +303,7 @@ def check_once(app_version, script_dir, credentials_file, folder_id, log, root, 
         except Exception:
             pass
         return
-    root.after(0, lambda: _ask_and_apply(root, quit_app, state_path, script_dir, r_app, new_exe, log))
+    _ui_queue.put(lambda: _ask_and_apply(root, quit_app, state_path, script_dir, r_app, new_exe, log))
 
 
 def start(app_version, script_dir, credentials_file, folder_id, log, root, quit_app):
@@ -325,5 +327,31 @@ def start(app_version, script_dir, credentials_file, folder_id, log, root, quit_
             except Exception as e:
                 log(f"[update] check failed: {type(e).__name__}: {e}")
             time.sleep(CHECK_EVERY_SECONDS)
+
+    def pump():
+
+        try:
+
+            while True:
+
+                _ui_queue.get_nowait()()
+
+        except queue.Empty:
+
+            pass
+
+        except Exception:
+
+            pass
+
+        try:
+
+            root.after(500, pump)
+
+        except Exception:
+
+            pass
+
+    root.after(500, pump)
 
     threading.Thread(target=loop, daemon=True).start()
