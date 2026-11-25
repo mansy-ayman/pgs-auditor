@@ -299,6 +299,33 @@ async function loadSession() {
   }
 }
 
+/* ---------- Cancel (skip the tree check, show the checklist problems in Python) ---------- */
+$('cancel').onclick = async () => {
+  if (!farmCode) { $('status').textContent = 'Farm code missing'; return; }
+  if (!confirm('Cancel the tree count? The tree check will be skipped and the checklist problems will be shown in the tool.')) return;
+
+  $('cancel').disabled = true;
+  $('finish').disabled = true;
+  $('cancel').textContent = 'Cancelling…';
+
+  try {
+    const r = await fetch(BASE + '/tree-counter/cancel', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ farm_code: farmCode })
+    });
+    const d = await r.json();
+    if (!r.ok) throw Error(d.message || 'Cancel failed');
+    $('status').textContent = 'Tree count cancelled. Checklist problems are shown in the tool.';
+    $('cancel').textContent = 'Cancelled';
+  } catch (e) {
+    $('status').textContent = e.message;
+    $('cancel').disabled = false;
+    $('finish').disabled = false;
+    $('cancel').textContent = 'Cancel';
+  }
+};
+
 /* ---------- Finish ---------- */
 $('finish').onclick = async () => {
   if (!farmCode) { $('status').textContent = 'Farm code missing'; return; }

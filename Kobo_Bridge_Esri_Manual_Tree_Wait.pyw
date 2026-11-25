@@ -653,6 +653,36 @@ def tree_counter_session():
 def tree_counter_image(farm_code):
     return jsonify({"error": "Image files are disabled. The extension loads Esri World Imagery tiles directly."}), 410
 
+@app.route('/tree-counter/cancel', methods=['POST'])
+def tree_counter_cancel():
+    data = request.get_json(force=True, silent=True) or {}
+    code = str(data.get("farm_code", "")).strip()
+    if not code:
+        return jsonify({"status": "error", "message": "Farm code is missing"}), 400
+
+    with _tree_review_lock:
+        session = _tree_review_sessions.get(code)
+        if not session:
+            return jsonify({"status": "error", "message": "Unknown farm review"}), 404
+        session["tree_checked"] = False
+        session["cancelled"] = True
+        session["tree_problem"] = ""
+        _tree_review_sessions[code] = session
+        active = (_tree_review_active_code == code)
+        base_problems = list(session.get("base_problems", []))
+
+    if active:
+        def show_cancelled(code=code, base_problems=base_problems):
+            display = format_problems(base_problems)
+            set_rule_text(display or "No rules broken.", bool(base_problems))
+            log_to_console(f"⏹ Tree review cancelled for {code}: tree check skipped, {len(base_problems)} checklist problem(s) shown")
+        root.after(0, show_cancelled)
+
+    return jsonify({
+        "status": "success",
+        "cancelled": True,
+        "problems": base_problems,
+    }), 200
 
 @app.route('/tree-counter/result', methods=['POST'])
 def tree_counter_result():
