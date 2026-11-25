@@ -2,7 +2,7 @@
 from PyInstaller.utils.hooks import collect_data_files
 
 a = Analysis(
-    ['precise_find_tool_with_divide_work__1_.pyw'],
+    ['Kobo_Bridge_Esri_Manual_Tree_Wait.pyw'],
     pathex=[],
     binaries=[],
     datas=collect_data_files('tzdata') + collect_data_files('certifi'),
@@ -20,7 +20,8 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='PGS_Tool',
+    name='PGS_Tool',
+    icon=['PGS_Tool.ico'],
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
