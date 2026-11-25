@@ -302,8 +302,7 @@ async function loadSession() {
 /* ---------- Cancel (skip the tree check, show the checklist problems in Python) ---------- */
 $('cancel').onclick = async () => {
   if (!farmCode) { $('status').textContent = 'Farm code missing'; return; }
-  if (!confirm('Cancel the tree count? The tree check will be skipped and the checklist problems will be shown in the tool.')) return;
-
+  
   $('cancel').disabled = true;
   $('finish').disabled = true;
   $('cancel').textContent = 'Cancelling…';

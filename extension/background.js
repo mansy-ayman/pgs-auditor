@@ -156,6 +156,10 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
   }
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
+  if (treeTabIds.has(tabId)) {
+  treeTabIds.delete(tabId);
+  addLog(`🧹 Tree-review tab ${tabId} was closed`);
+}
   headerQueue.delete(tabId);
   if (session && session.tabId === tabId) advance(session);      // tab closed = it was a download
 });
@@ -269,6 +273,7 @@ chrome.downloads.onChanged.addListener((delta) => {
 // ---------------- poll Python document + manual tree-review queues ----------------
 let pollDelay = 3000, pollTimer = null, polling = false;
 const openedTreeFarms = new Set();
+const treeTabIds = new Set();
 
 async function pollTreeReviewQueue() {
   try {
@@ -288,6 +293,7 @@ async function pollTreeReviewQueue() {
           addLog(`❌ Could not open tree-review tab for ${code}: ${chrome.runtime.lastError?.message || 'unknown error'}`);
         } else {
           addLog(`🌳 Tree-review tab opened for ${code} (tab ${tab.id})`);
+          treeTabIds.add(tab.id);
         }
       });
     }
